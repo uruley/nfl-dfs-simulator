@@ -63,3 +63,6 @@ Minimum for gated Showdown sims:
 Optional / blank OK until sourced: `own_est`, `implied_td`, `flex_value`, `cpt_value`, `opp`, `game_info`, `slate`
 
 Classic omits CPT columns. DST and K included when in the DK pool.
+
+## Salary pool ingest
+DK lobby / Salary Cap CSV → normalized pool: see `INGEST.md` and `python -m nfl_dfs ingest-dk-salary`.

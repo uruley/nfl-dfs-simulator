@@ -1,15 +1,17 @@
-# NFL DFS — DraftKings Showdown Simulator (v1)
+# NFL DFS — DraftKings Simulator
 
-Local Python package that implements the desk Showdown OS method:
+Local Python package for the desk DFS method:
 
-1. **Simulate many game scripts** for one NFL game (pace, pass/run tilt, margin, weather).
-2. **Best legal DK Showdown lineup per script** — CPT + 5 FLEX, $50k cap, CPT salary & points ×1.5, unique players.
-3. **Price candidates** vs an optional contest (field size, simple prize pool, ownership leverage).
-4. **Portfolio** across distinct scripts with default **40%** player exposure cap.
-5. **Seed** + user **reads** (`--read NAME=1.2` boost / `ID=0.8` fade).
-6. **Backtest hook** — score portfolio vs actual FP; write calibration notes. **Never mutates** delivered CSVs in `uploads/`.
+1. **Simulate** game scripts (Showdown) or multi-game correlated scripts (Classic).
+2. **Optimize** legal DK lineups under salary + roster rules.
+3. **Portfolio** with default **~40%** player exposure.
+4. **Ingest** real DK salary-file CSVs into normalized pools.
+5. **Contest Flashback** — score uploads vs actuals; emit next-build gates (never mutates `uploads/`).
 
-Hard rules: `DK-NFL-SHOWDOWN-RULES.md`. Desk map: `DESK.md`. Projection contracts: `PROJECTIONS.md`.
+Hard rules: `DK-NFL-SHOWDOWN-RULES.md`, `DK-NFL-CLASSIC-RULES.md`.  
+Projection contracts: `PROJECTIONS.md`. Salary ingest: `INGEST.md`. Desk map: `DESK.md`.
+
+**Live slate lock is ON** — use fixtures / saved exports only; do not scrape live DK for production lineups.
 
 ## Install
 
@@ -21,7 +23,18 @@ pip install -e ".[dev]"
 
 Requires Python 3.11+ and `numpy`. No paid APIs; tests need no network.
 
-## CLI
+## CLI overview
+
+| Command | Purpose |
+|---------|---------|
+| `sim-showdown` | Showdown scripts → CPT+FLEX lineups → portfolio |
+| `sim-classic` | Classic multi-game sims → 9-slot lineups → portfolio |
+| `ingest-dk-salary` | DK salary CSV → normalized pool CSV |
+| `flashback` | Score lineups vs actuals → scores + summary + gates |
+
+---
+
+### 1) Showdown
 
 ```bash
 python -m nfl_dfs sim-showdown \
@@ -34,31 +47,68 @@ python -m nfl_dfs sim-showdown \
   --out /home/box/nfl-dfs/exports
 ```
 
-Optional:
+Optional: `--read NAME=1.2`, `--field-size` / `--entry-fee`, `--actuals`, `--backtest-out`.
 
-| Flag | Meaning |
+Outputs: `lineups-showdown-upload.csv` (header `CPT,FLEX×5`), summary, exposures, meta.
+
+### 2) Classic
+
+```bash
+python -m nfl_dfs sim-classic \
+  --pool fixtures/classic_pool.csv \
+  --projections fixtures/classic_projections.csv \
+  --n-sims 200 \
+  --portfolio 20 \
+  --exposure 0.40 \
+  --seed 7 \
+  --out /home/box/nfl-dfs/exports
+```
+
+Optional: `--read NAME=1.2` (repeatable).
+
+**Sim method:** for each draw, sample a mini game-script per slate game (pace / pass-tilt / margin / weather), tilt player means, then add team + pass-game correlated residuals. Documented in `src/nfl_dfs/classic_sim.py`.
+
+**Rules enforced:** QB,RB,RB,WR,WR,WR,TE,FLEX,DST; $50k; FLEX=RB/WR/TE; ≥2 games on multi-game slates; upload cells `Name (id)`.
+
+Outputs: `lineups-classic-upload.csv` (header exactly `QB,RB,RB,WR,WR,WR,TE,FLEX,DST`), summary, exposures, meta.
+
+### 3) Ingest DK salary file
+
+```bash
+python -m nfl_dfs ingest-dk-salary \
+  --input fixtures/dk_salary_classic_sample.csv \
+  --out /tmp/classic_pool_norm.csv
+```
+
+Detects Showdown vs Classic from `Roster Position`. See `INGEST.md`.
+
+### 4) Contest Flashback
+
+```bash
+python -m nfl_dfs flashback \
+  --lineups exports/lineups-showdown-upload.csv \
+  --actuals fixtures/actuals.csv \
+  --contest fixtures/contest_sample.json \
+  --out /home/box/nfl-dfs/backtests
+```
+
+Emits:
+
+| File | Content |
 |------|---------|
-| `--read NAME=1.2` | Boost/fade (repeatable); matches `dk_id` or player name |
-| `--field-size` / `--entry-fee` | Enable simple contest pricing / leverage sort |
-| `--actuals fixtures/actuals.csv` | Backtest portfolio; writes calibration notes |
-| `--backtest-out PATH` | Calibration markdown path (default under `--out`) |
+| `flashback-scores.csv` | Per-lineup FP (Showdown CPT×1.5 / Classic flat) + rank |
+| `flashback-summary.md` | Brief + exposures vs actual |
+| `next-build-gates.json` | Conservative fade/boost gates for **next** build only |
 
-### Outputs (under `--out`)
+Optional `--payouts place,payout CSV`. **Never mutates `uploads/`.**
 
-| File | Contract |
-|------|----------|
-| `lineups-showdown-upload.csv` | Bare DK Lineup Upload: header exactly `CPT,FLEX,FLEX,FLEX,FLEX,FLEX`; cells `Name (id)` |
-| `sim-showdown-summary.txt` | Exposures, script-tag coverage, top leverage notes |
-| `sim-showdown-exposures.csv` | Player → portfolio exposure |
-| `sim-showdown-meta.json` | Run metadata |
-| `backtest-calibration.md` | Only if `--actuals` given — next-build gates only |
+---
 
 ## Method (short)
 
-- Scripts tilt team means (QB/WR/TE vs RB/DST) then sample correlated residuals (team + pass-game latents).
-- Optimizer: try each CPT; greedy FLEX by FP with value fallback + local swaps under remaining salary.
-- Portfolio: unique lineup keys, prefer distinct `script_id`s, enforce exposure ≤ cap (tiny +5% relax if under-filled).
-- Contest price: `leverage ≈ sim_frequency − avg_ownership` (uses `own_est` when present).
+- **Showdown:** scripts tilt team means then sample correlated residuals; try each CPT; portfolio with exposure + CPT diversity.
+- **Classic:** per-game scripts across the slate + correlated noise; greedy slot fill with local swaps; portfolio exposure cap (~40%, soft +5–10% relax if under-filled).
+- **Contest price (Showdown):** `leverage ≈ sim_frequency − avg_ownership`.
 
 ## DK scoring (enforced in `scoring.py`)
 
@@ -67,13 +117,13 @@ Pass Yd 0.04 · Pass TD 4 · INT −1 · Rush/Rec Yd 0.1 · Rush/Rec TD 6 · Rec
 ## Layout
 
 ```
-src/nfl_dfs/     scoring, showdown_rules, scripts, optimize, contest, portfolio, backtest, cli
-fixtures/        fake two-team Showdown pool (~24) + projections + actuals
-tests/           pytest (CPT salary, uniqueness, bonuses, exposure, CSV header, CLI)
-lab/             Sim Lab notes / legacy prototypes (see lab/README.md)
-uploads/         delivered uploads — never mutated by Lab/sim
-exports/         sim outputs & production projection handoffs
-backtests/       calibration artifacts
+src/nfl_dfs/     scoring, showdown_rules, classic_*, scripts, optimize,
+                 portfolio, contest, ingest, backtest, flashback, cli
+fixtures/        showdown + classic pools/projections/actuals + DK salary samples
+tests/           pytest
+uploads/         delivered uploads — never mutated by Lab/sim/flashback
+exports/         sim outputs & projection handoffs
+backtests/       flashback / calibration artifacts
 ```
 
 ## Tests
@@ -82,5 +132,3 @@ backtests/       calibration artifacts
 cd /home/box/nfl-dfs && source .venv/bin/activate
 pytest -q
 ```
-
-Target: 200 scripts + 20-lineup portfolio finishes in under ~30s on this machine.

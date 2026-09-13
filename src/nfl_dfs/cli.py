@@ -1,4 +1,4 @@
-"""CLI: python -m nfl_dfs sim-showdown ..."""
+"""CLI: python -m nfl_dfs <command> ..."""
 
 from __future__ import annotations
 
@@ -83,7 +83,6 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         tag_counts[script["tag"]] += 1
         means = script_player_means(players, script, teams)
         fp = sample_outcomes(means, stds, teams_idx, pos_codes, rng)
-        # Top lineups across CPTs per script → more portfolio diversity
         alts = build_lineups_by_cpt(
             players, fp, script_id=script["script_id"], tag=script["tag"], top_n=4
         )
@@ -93,7 +92,6 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         print("ERROR: no legal lineups built across scripts", file=sys.stderr)
         return 1
 
-    # frequency for contest pricing
     freq_counts: Counter = Counter(lu.key() for lu in candidates)
     n_built = len(candidates)
     sim_freq = {k: c / n_built for k, c in freq_counts.items()}
@@ -106,8 +104,6 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         )
     priced = price_lineups(candidates, players, contest=contest, sim_freq=sim_freq)
 
-    # portfolio from candidates (distinct scripts); optionally bias by leverage
-    # sort candidates: leverage then sim_fp for portfolio preference
     leverage_map = {p.lineup.key(): p.leverage for p in priced}
     ranked_for_port = sorted(
         candidates,
@@ -129,7 +125,6 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     upload_path = out_dir / "lineups-showdown-upload.csv"
     write_upload_csv(upload_path, port.lineups)
 
-    # summary
     id_to_name = {p.dk_id: p.name for p in players}
     summary_path = out_dir / "sim-showdown-summary.txt"
     lines = [
@@ -168,7 +163,6 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     summary_text = "\n".join(lines) + "\n"
     summary_path.write_text(summary_text, encoding="utf-8")
 
-    # sidecar: exposures JSON + candidates sample
     exp_path = out_dir / "sim-showdown-exposures.csv"
     with exp_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["dk_id", "name", "exposure"])
@@ -189,7 +183,6 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     }
     (out_dir / "sim-showdown-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    # optional backtest
     if args.actuals:
         actual = load_actual_fp(Path(args.actuals))
         bt = score_portfolio(port.lineups, actual)
@@ -214,8 +207,176 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sim_classic(args: argparse.Namespace) -> int:
+    from nfl_dfs import classic_rules as cr
+    from nfl_dfs.classic_optimize import build_lineups_diverse
+    from nfl_dfs.classic_portfolio import build_classic_portfolio
+    from nfl_dfs.classic_sim import prepare_classic_arrays, sample_classic_outcomes
+
+    pool_path = Path(args.pool)
+    proj_path = Path(args.projections)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pool = cr.load_pool_csv(pool_path) if pool_path.exists() else []
+    proj = cr.load_projections_csv(proj_path) if proj_path.exists() else {}
+    if not pool and proj:
+        pool = [
+            {
+                "dk_id": v["dk_id"],
+                "name": v["name"],
+                "position": v["position"],
+                "team": v["team"],
+                "opp": v.get("opp", ""),
+                "salary": v.get("salary") or 0,
+                "game_key": v.get("game_key", ""),
+                "game_info": v.get("game_info", ""),
+            }
+            for v in proj.values()
+        ]
+    players = cr.merge_pool_proj(pool, proj)
+    if len(players) < 9:
+        print(f"ERROR: need ≥9 projected players, got {len(players)}", file=sys.stderr)
+        return 1
+
+    reads = _parse_reads(args.read)
+    cr.apply_reads(players, reads)
+
+    rng = np.random.default_rng(args.seed)
+    _teams, teams_idx, pos_codes, stds, game_keys = prepare_classic_arrays(players)
+    n_sims = args.n_sims
+
+    candidates = []
+    tag_counts: Counter = Counter()
+    for i in range(n_sims):
+        fp, tag = sample_classic_outcomes(
+            players, teams_idx, pos_codes, stds, game_keys, rng, sim_id=i
+        )
+        tag_counts[tag] += 1
+        alts = build_lineups_diverse(
+            players, fp, script_id=i, tag=tag, top_n=4
+        )
+        candidates.extend(alts)
+
+    if not candidates:
+        print("ERROR: no legal Classic lineups built across sims", file=sys.stderr)
+        return 1
+
+    port = build_classic_portfolio(
+        candidates,
+        size=args.portfolio,
+        max_exposure=args.exposure,
+        player_pool=players,
+    )
+
+    if len(port.lineups) < args.portfolio:
+        print(
+            f"WARN: portfolio size {len(port.lineups)} < requested {args.portfolio}",
+            file=sys.stderr,
+        )
+
+    upload_path = out_dir / "lineups-classic-upload.csv"
+    cr.write_upload_csv(upload_path, port.lineups)
+
+    id_to_name = {p.dk_id: p.name for p in players}
+    n_games = cr.slate_game_count(players)
+    summary_path = out_dir / "sim-classic-summary.txt"
+    lines = [
+        "NFL DFS — Classic sim v1",
+        f"players={len(players)}  n_sims={n_sims}  built={len(candidates)}  seed={args.seed}",
+        f"slate_games={n_games}  salary_cap={cr.SALARY_CAP}  exposure_cap={args.exposure}",
+        f"portfolio={len(port.lineups)}  unique_scripts={port.n_unique_scripts}  "
+        f"unique_lineups={port.n_unique_lineups}",
+        f"script_tags_sampled={dict(tag_counts)}",
+        f"script_tags_portfolio={port.script_tags}",
+        f"reads={reads or '{}'}",
+        "",
+        "Sim method: per-game script tilt + team/pass correlated residuals (see classic_sim.py).",
+        "Upload header: " + ",".join(cr.UPLOAD_HEADER),
+        f"Upload CSV: {upload_path}",
+        "",
+        "Player exposures (portfolio):",
+    ]
+    for pid, exp in sorted(port.exposures.items(), key=lambda x: -x[1]):
+        lines.append(f"  {exp:6.1%}  {id_to_name.get(pid, pid)} ({pid})")
+    lines.append("")
+    lines.append("Never mutate delivered CSVs in uploads/; version upgrades with -v2.")
+    summary_text = "\n".join(lines) + "\n"
+    summary_path.write_text(summary_text, encoding="utf-8")
+
+    exp_path = out_dir / "sim-classic-exposures.csv"
+    with exp_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["dk_id", "name", "exposure"])
+        w.writeheader()
+        for pid, exp in sorted(port.exposures.items(), key=lambda x: -x[1]):
+            w.writerow(
+                {"dk_id": pid, "name": id_to_name.get(pid, pid), "exposure": round(exp, 4)}
+            )
+
+    meta = {
+        "n_sims": n_sims,
+        "n_built": len(candidates),
+        "portfolio": len(port.lineups),
+        "seed": args.seed,
+        "exposure_cap": args.exposure,
+        "slate_games": n_games,
+        "script_tags_portfolio": port.script_tags,
+        "upload": str(upload_path),
+        "sim_method": "per-game script tilt + correlated residuals",
+    }
+    (out_dir / "sim-classic-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    print(summary_text)
+    print(f"Wrote {upload_path} ({len(port.lineups)} rows)")
+    return 0
+
+
+def cmd_ingest_dk_salary(args: argparse.Namespace) -> int:
+    from nfl_dfs.ingest import ingest_dk_salary_csv, write_normalized_pool
+
+    src = Path(args.input)
+    out = Path(args.out)
+    result = ingest_dk_salary_csv(src)
+    if not result.rows:
+        print("ERROR: no players parsed", file=sys.stderr)
+        return 1
+    write_normalized_pool(out, result)
+    print(
+        f"Ingested {len(result.rows)} players as {result.kind} → {out}"
+        + (f"  warnings={result.warnings}" if result.warnings else "")
+    )
+    return 0
+
+
+def cmd_flashback(args: argparse.Namespace) -> int:
+    from nfl_dfs.flashback import run_flashback, write_flashback_artifacts
+
+    lineups = Path(args.lineups)
+    actuals = Path(args.actuals)
+    out_dir = Path(args.out)
+    contest = Path(args.contest) if args.contest else None
+    payouts = Path(args.payouts) if getattr(args, "payouts", None) else None
+
+    # Hard safety: never write into uploads/
+    if "uploads" in out_dir.resolve().parts and out_dir.resolve().name == "uploads":
+        print("ERROR: refusing to write under uploads/", file=sys.stderr)
+        return 1
+
+    result = run_flashback(lineups, actuals, contest_path=contest, payouts_path=payouts)
+    paths = write_flashback_artifacts(result, out_dir)
+    print(
+        f"Flashback ({result.kind}): n={len(result.scores)} "
+        f"mean={result.mean_fp:.2f} max={result.max_fp:.2f}"
+    )
+    for k, p in paths.items():
+        print(f"  {k}: {p}")
+    if result.gates:
+        print(f"  gates: {len(result.gates)} actionable")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="nfl_dfs", description="NFL DFS Showdown simulator")
+    ap = argparse.ArgumentParser(prog="nfl_dfs", description="NFL DFS simulator")
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("sim-showdown", help="Run Showdown game-script sim + portfolio")
@@ -241,6 +402,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Calibration notes path (default: OUT/backtest-calibration.md)",
     )
     p.set_defaults(func=cmd_sim_showdown)
+
+    c = sub.add_parser("sim-classic", help="Run Classic multi-game sim + portfolio")
+    c.add_argument("--pool", required=True, help="Classic player pool CSV")
+    c.add_argument("--projections", required=True, help="Classic projections CSV")
+    c.add_argument("--n-sims", type=int, default=200)
+    c.add_argument("--portfolio", type=int, default=20)
+    c.add_argument("--exposure", type=float, default=0.40)
+    c.add_argument("--seed", type=int, default=7)
+    c.add_argument("--out", required=True, help="Output directory")
+    c.add_argument(
+        "--read",
+        action="append",
+        default=[],
+        help="Boost/fade read NAME=1.2 or dk_id=0.8 (repeatable)",
+    )
+    c.set_defaults(func=cmd_sim_classic)
+
+    ing = sub.add_parser(
+        "ingest-dk-salary",
+        help="Normalize DK salary-file CSV → showdown/classic pool CSV",
+    )
+    ing.add_argument("--input", "-i", required=True, help="DK salary export CSV")
+    ing.add_argument("--out", "-o", required=True, help="Normalized pool CSV path")
+    ing.set_defaults(func=cmd_ingest_dk_salary)
+
+    fb = sub.add_parser(
+        "flashback",
+        help="Score lineups vs actuals; write scores/summary/next-build gates",
+    )
+    fb.add_argument(
+        "--lineups",
+        required=True,
+        help="Upload or export CSV (Showdown or Classic header)",
+    )
+    fb.add_argument("--actuals", required=True, help="Actual FP CSV (dk_id, actual_fp)")
+    fb.add_argument(
+        "--contest",
+        default="",
+        help="Optional contest.json (field_size, field_mean, field_std)",
+    )
+    fb.add_argument(
+        "--payouts",
+        default="",
+        help="Optional payout CSV (place,payout)",
+    )
+    fb.add_argument(
+        "--out",
+        required=True,
+        help="Output directory (e.g. backtests/) — never uploads/",
+    )
+    fb.set_defaults(func=cmd_flashback)
+
     return ap
 
 

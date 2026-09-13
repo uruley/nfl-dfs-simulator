@@ -1,0 +1,29 @@
+slate,dk_id,name,position,team,opp,salary,game_info,proj_fp,floor,ceiling,std,own_est,sources,notes
+demo,910001,Patrick Mahomes,QB,KC,BUF,7800,KC@BUF 01:00PM ET,22.5,16.5,28.5,7.0,18,demo,ESTIMATE: fixture
+demo,910002,Josh Allen,QB,BUF,KC,8000,KC@BUF 01:00PM ET,24.0,17.5,30.5,7.5,20,demo,ESTIMATE: fixture
+demo,910003,Jalen Hurts,QB,PHI,DAL,7600,PHI@DAL 04:25PM ET,23.2,16.0,29.0,7.2,17,demo,ESTIMATE: fixture
+demo,910004,Dak Prescott,QB,DAL,PHI,7200,PHI@DAL 04:25PM ET,20.5,14.0,26.5,6.8,12,demo,ESTIMATE: fixture
+demo,910005,Isiah Pacheco,RB,KC,BUF,6400,KC@BUF 01:00PM ET,14.5,9.0,20.0,5.5,14,demo,ESTIMATE: fixture
+demo,910006,James Cook,RB,BUF,KC,6600,KC@BUF 01:00PM ET,15.2,9.5,21.0,5.6,15,demo,ESTIMATE: fixture
+demo,910007,Saquon Barkley,RB,PHI,DAL,7800,PHI@DAL 04:25PM ET,18.5,12.0,25.0,6.5,22,demo,ESTIMATE: fixture
+demo,910008,Tony Pollard,RB,DAL,PHI,5800,PHI@DAL 04:25PM ET,12.8,7.5,18.0,5.2,10,demo,ESTIMATE: fixture
+demo,910009,Clyde Edwards-Helaire,RB,KC,BUF,4200,KC@BUF 01:00PM ET,7.5,4.0,11.5,3.8,4,demo,ESTIMATE: fixture
+demo,910010,Ty Johnson,RB,BUF,KC,3800,KC@BUF 01:00PM ET,5.5,2.5,9.0,3.2,2,demo,ESTIMATE: fixture
+demo,910011,Stefon Diggs,WR,BUF,KC,7400,KC@BUF 01:00PM ET,16.8,11.0,22.5,6.0,16,demo,ESTIMATE: fixture
+demo,910012,Rashee Rice,WR,KC,BUF,6200,KC@BUF 01:00PM ET,13.5,8.5,19.0,5.2,11,demo,ESTIMATE: fixture
+demo,910013,A.J. Brown,WR,PHI,DAL,7600,PHI@DAL 04:25PM ET,17.2,11.5,23.0,6.0,15,demo,ESTIMATE: fixture
+demo,910014,CeeDee Lamb,WR,DAL,PHI,7800,PHI@DAL 04:25PM ET,18.0,12.0,24.0,6.2,18,demo,ESTIMATE: fixture
+demo,910015,Khalil Shakir,WR,BUF,KC,5200,KC@BUF 01:00PM ET,11.0,6.5,15.5,4.5,8,demo,ESTIMATE: fixture
+demo,910016,Marquise Brown,WR,KC,BUF,4800,KC@BUF 01:00PM ET,9.5,5.0,14.0,4.2,6,demo,ESTIMATE: fixture
+demo,910017,DeVonta Smith,WR,PHI,DAL,6000,PHI@DAL 04:25PM ET,13.0,8.0,18.0,5.0,10,demo,ESTIMATE: fixture
+demo,910018,Brandin Cooks,WR,DAL,PHI,4600,PHI@DAL 04:25PM ET,9.0,5.0,13.5,4.0,5,demo,ESTIMATE: fixture
+demo,910019,Travis Kelce,TE,KC,BUF,6800,KC@BUF 01:00PM ET,15.0,10.0,20.5,5.5,14,demo,ESTIMATE: fixture
+demo,910020,Dalton Kincaid,TE,BUF,KC,4400,KC@BUF 01:00PM ET,9.2,5.5,13.5,4.0,6,demo,ESTIMATE: fixture
+demo,910021,Dallas Goedert,TE,PHI,DAL,4200,PHI@DAL 04:25PM ET,9.8,5.5,14.0,4.2,7,demo,ESTIMATE: fixture
+demo,910022,Jake Ferguson,TE,DAL,PHI,4000,PHI@DAL 04:25PM ET,8.5,4.5,12.5,4.0,5,demo,ESTIMATE: fixture
+demo,910023,Chiefs,DST,KC,BUF,2800,KC@BUF 01:00PM ET,6.5,3.0,11.0,4.0,4,demo,ESTIMATE: fixture
+demo,910024,Bills,DST,BUF,KC,3000,KC@BUF 01:00PM ET,7.0,3.5,11.5,4.2,5,demo,ESTIMATE: fixture
+demo,910025,Eagles,DST,PHI,DAL,3200,PHI@DAL 04:25PM ET,7.5,3.5,12.0,4.3,6,demo,ESTIMATE: fixture
+demo,910026,Cowboys,DST,DAL,PHI,2600,PHI@DAL 04:25PM ET,5.5,2.5,9.5,3.8,3,demo,ESTIMATE: fixture
+demo,910027,Curtis Samuel,WR,BUF,KC,3600,KC@BUF 01:00PM ET,7.2,3.5,11.0,3.8,3,demo,ESTIMATE: fixture
+demo,910028,Jahan Dotson,WR,PHI,DAL,3400,PHI@DAL 04:25PM ET,6.8,3.0,10.5,3.6,2,demo,ESTIMATE: fixture
