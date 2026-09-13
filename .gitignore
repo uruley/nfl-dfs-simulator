@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.DS_Store
+uploads/*
+!uploads/.gitkeep
+exports/*
+!exports/.gitkeep
+sources/*
+!sources/.gitkeep
+backtests/*
+!backtests/.gitkeep
+*.csv.bak
