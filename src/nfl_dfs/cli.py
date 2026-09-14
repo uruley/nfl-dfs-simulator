@@ -26,7 +26,11 @@ from nfl_dfs.contest import (
 )
 from nfl_dfs.optimize import build_best_lineup, build_lineups_by_cpt
 from nfl_dfs.portfolio import build_portfolio
-from nfl_dfs.scorepath import realize_game_path, write_path_summaries_csv
+from nfl_dfs.scorepath import (
+    realize_game_path,
+    write_path_summaries_csv,
+    write_script_projections_csv,
+)
 from nfl_dfs.scripts import prepare_arrays, sample_outcomes, sample_scripts, script_player_means
 from nfl_dfs.showdown_rules import (
     SALARY_CAP,
@@ -149,6 +153,9 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     candidates = []
     tag_counts: Counter = Counter()
     path_summaries: list[dict] = []
+    path_records: list[tuple] = []  # (fp_array, tags) for script-projections export
+    gpp = bool(getattr(args, "gpp", True))
+    min_per_tag = int(getattr(args, "min_per_tag", 2) or 0)
 
     if engine == "legacy":
         scripts = sample_scripts(args.n_scripts, rng, spread=spread, total=total)
@@ -164,6 +171,7 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
                 {
                     "script_id": script["script_id"],
                     "tag": script["tag"],
+                    "tags": [script["tag"]],
                     "possessions": "",
                     "final_margin": round(float(script["margin"]), 2),
                     "pass_rate": round(float(script["pass_tilt"]), 3),
@@ -172,6 +180,7 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
                     "top_scorers": [],
                 }
             )
+            path_records.append((fp, [script["tag"]]))
             if progress_every and (script["script_id"] + 1) % progress_every == 0:
                 print(
                     f"legacy progress {script['script_id']+1}/{args.n_scripts}",
@@ -190,6 +199,7 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
             )
             tag_counts[summary["tag"]] += 1
             path_summaries.append(summary)
+            path_records.append((fp, list(summary.get("tags") or [summary["tag"]])))
             # Best legal CPT+5FLEX for this realized path (plus CPT diversity alts)
             best = build_best_lineup(
                 players, fp, script_id=i, tag=summary["tag"]
@@ -257,6 +267,8 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         max_exposure=args.exposure,
         player_pool=players,
         own_map=own_map,
+        gpp=gpp,
+        min_per_tag=min_per_tag,
     )
 
     if len(port.lineups) < args.portfolio:
@@ -273,20 +285,44 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     id_to_name = {p.dk_id: p.name for p in players}
     summary_path = out_dir / "sim-showdown-summary.txt"
     write_path_summaries_csv(out_dir / "path-summaries.csv", path_summaries)
+    write_script_projections_csv(out_dir / "script-projections.csv", players, path_records)
+    major_counts = dict(port.major_tag_counts or {})
+    # Also tally major tags from compound portfolio script_tags keys
+    if not major_counts:
+        from nfl_dfs.portfolio import major_tags_for_lineup
+
+        mc: Counter = Counter()
+        for lu in port.lineups:
+            for m in major_tags_for_lineup(lu.tag):
+                mc[m] += 1
+        major_counts = dict(mc)
+    n_port = max(1, len(port.lineups))
+    tag_warn = ""
+    for mt, cnt in major_counts.items():
+        if cnt / n_port > 0.50 + 1e-12:
+            tag_warn = f"WARN: tag {mt} is {cnt}/{n_port} ({cnt/n_port:.0%}) of portfolio (>50%)"
+            break
     lines = [
         "NFL DFS — Showdown sim v3 (scorepath / SaberSim-like)",
         f"players={len(players)}  n_scripts={args.n_scripts}  built={n_built}  seed={args.seed}",
         f"engine={engine}  teams={','.join(teams)}  salary_cap={SALARY_CAP}  exposure_cap={args.exposure}",
+        f"gpp={gpp}  min_per_tag={min_per_tag}",
         f"vegas_spread={spread}  vegas_total={total}",
         f"field_sims={field_sims}  ownership_players={len(own_map)}",
         f"portfolio={len(port.lineups)}  unique_scripts={port.n_unique_scripts}  "
         f"unique_lineups={port.n_unique_lineups}",
         f"script_tags_sampled={dict(tag_counts)}",
         f"script_tags_portfolio={port.script_tags}",
+        f"lineups_per_major_tag={major_counts}",
         f"reads={reads or '{}'}",
+    ]
+    if tag_warn:
+        lines.append(tag_warn)
+    lines += [
         "",
         "Upload header: " + ",".join(header_used),
         f"Upload CSV: {upload_path}",
+        f"Script projections: {out_dir / 'script-projections.csv'}",
         "",
         "Player exposures (portfolio):",
     ]
@@ -365,13 +401,17 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         "seed": args.seed,
         "engine": engine,
         "exposure_cap": args.exposure,
+        "gpp": gpp,
+        "min_per_tag": min_per_tag,
         "vegas_spread": spread,
         "vegas_total": total,
         "field_sims": field_sims,
         "script_tags_portfolio": port.script_tags,
+        "lineups_per_major_tag": major_counts,
         "upload": str(upload_path),
         "upload_format": "entry-id" if entry_ids is not None else "bare",
         "path_summaries": str(out_dir / "path-summaries.csv"),
+        "script_projections": str(out_dir / "script-projections.csv"),
     }
     (out_dir / "sim-showdown-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -445,6 +485,9 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
     candidates = []
     tag_counts: Counter = Counter()
     path_summaries: list[dict] = []
+    path_records: list[tuple] = []
+    gpp = bool(getattr(args, "gpp", True))
+    min_per_tag = int(getattr(args, "min_per_tag", 2) or 0)
     for i in range(n_sims):
         if engine == "legacy":
             fp, tag = sample_classic_outcomes(
@@ -463,6 +506,7 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
             tag = summary["tag"]
         tag_counts[tag] += 1
         path_summaries.append(summary)
+        path_records.append((fp, list(summary.get("tags") or [tag])))
         alts = build_lineups_diverse(
             players, fp, script_id=i, tag=tag, top_n=4
         )
@@ -479,6 +523,8 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
         size=args.portfolio,
         max_exposure=args.exposure,
         player_pool=players,
+        gpp=gpp,
+        min_per_tag=min_per_tag,
     )
 
     if len(port.lineups) < args.portfolio:
@@ -494,19 +540,42 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
     n_games = cr.slate_game_count(players)
     summary_path = out_dir / "sim-classic-summary.txt"
     write_path_summaries_csv(out_dir / "path-summaries.csv", path_summaries)
+    write_script_projections_csv(out_dir / "script-projections.csv", players, path_records)
+    major_counts = dict(port.major_tag_counts or {})
+    if not major_counts:
+        from nfl_dfs.portfolio import major_tags_for_lineup
+
+        mc: Counter = Counter()
+        for lu in port.lineups:
+            for m in major_tags_for_lineup(lu.tag):
+                mc[m] += 1
+        major_counts = dict(mc)
+    n_port = max(1, len(port.lineups))
+    tag_warn = ""
+    for mt, cnt in major_counts.items():
+        if cnt / n_port > 0.50 + 1e-12:
+            tag_warn = f"WARN: tag {mt} is {cnt}/{n_port} ({cnt/n_port:.0%}) of portfolio (>50%)"
+            break
     lines = [
         "NFL DFS — Classic sim v2 (scorepath)",
         f"players={len(players)}  n_sims={n_sims}  built={len(candidates)}  seed={args.seed}",
         f"engine={engine}  slate_games={n_games}  salary_cap={cr.SALARY_CAP}  exposure_cap={args.exposure}",
+        f"gpp={gpp}  min_per_tag={min_per_tag}",
         f"portfolio={len(port.lineups)}  unique_scripts={port.n_unique_scripts}  "
         f"unique_lineups={port.n_unique_lineups}",
         f"script_tags_sampled={dict(tag_counts)}",
         f"script_tags_portfolio={port.script_tags}",
+        f"lineups_per_major_tag={major_counts}",
         f"reads={reads or '{}'}",
+    ]
+    if tag_warn:
+        lines.append(tag_warn)
+    lines += [
         "",
         f"Sim method: engine={engine} (scorepath=possession model; legacy=mean-tilt+residuals).",
         "Upload header: " + ",".join(cr.UPLOAD_HEADER),
         f"Upload CSV: {upload_path}",
+        f"Script projections: {out_dir / 'script-projections.csv'}",
         "",
         "Player exposures (portfolio):",
     ]
@@ -532,12 +601,16 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
         "portfolio": len(port.lineups),
         "seed": args.seed,
         "exposure_cap": args.exposure,
+        "gpp": gpp,
+        "min_per_tag": min_per_tag,
         "slate_games": n_games,
         "script_tags_portfolio": port.script_tags,
+        "lineups_per_major_tag": major_counts,
         "upload": str(upload_path),
         "engine": engine,
         "sim_method": "scorepath" if engine != "legacy" else "per-game script tilt + correlated residuals",
         "path_summaries": str(out_dir / "path-summaries.csv"),
+        "script_projections": str(out_dir / "script-projections.csv"),
     }
     (out_dir / "sim-classic-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -661,6 +734,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-scripts", type=int, default=200)
     p.add_argument("--portfolio", type=int, default=20)
     p.add_argument("--exposure", type=float, default=0.40)
+    p.add_argument(
+        "--gpp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="GPP portfolio: seed lineups from script-tag buckets (default on)",
+    )
+    p.add_argument(
+        "--min-per-tag",
+        type=int,
+        default=2,
+        help="Minimum lineups to take from each major script tag when available",
+    )
     p.add_argument("--seed", type=int, default=7)
     p.add_argument(
         "--engine",
@@ -735,6 +820,18 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--n-sims", type=int, default=200)
     c.add_argument("--portfolio", type=int, default=20)
     c.add_argument("--exposure", type=float, default=0.40)
+    c.add_argument(
+        "--gpp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="GPP portfolio: seed lineups from script-tag buckets (default on)",
+    )
+    c.add_argument(
+        "--min-per-tag",
+        type=int,
+        default=2,
+        help="Minimum lineups to take from each major script tag when available",
+    )
     c.add_argument("--seed", type=int, default=7)
     c.add_argument(
         "--engine",

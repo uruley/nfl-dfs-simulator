@@ -60,7 +60,7 @@ Minimum for gated Showdown sims:
 - Showdown: `cpt_salary`, `cpt_proj`, `cpt_ceiling`
 - Provenance: `sources`, `notes` (`ESTIMATE:` / inactive flags)
 
-Optional / blank OK until sourced: `own_est`, `implied_td`, `flex_value`, `cpt_value`, `opp`, `game_info`, `slate`
+Optional / blank OK until sourced: `own_est`, `implied_td`, `flex_value`, `cpt_value`, `opp`, `game_info`, `slate`, `rush_share`, `target_share`, `rz_share` (0–1 usage priors for scorepath)
 
 Classic omits CPT columns. DST and K included when in the DK pool.
 

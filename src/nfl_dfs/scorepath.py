@@ -4,7 +4,7 @@ For ONE NFL game (Showdown) or per-game on a Classic slate:
   1. Sample a game path (possessions, margin lean, pass rates).
   2. Allocate team yards / TDs / turnovers at possession grain.
   3. Distribute production to players via projection-derived usage shares
-     (proj_fp × boost as relative weights within team/position groups).
+     (optional rush_share/target_share/rz_share, else proj_fp × boost).
   4. Convert box-score totals → DK fantasy points (scoring.py + DST/K heuristics).
   5. Return per-player realized FP + path summary dict.
 
@@ -29,6 +29,10 @@ class _HasProj(Protocol):
     team: str
     proj_fp: float
     boost: float
+    # Optional usage priors (0–1); missing → fall back to proj_fp × boost
+    rush_share: float | None
+    target_share: float | None
+    rz_share: float | None
 
 
 # ---------------------------------------------------------------------------
@@ -229,15 +233,16 @@ def _allocate_team_boxes(
             + boxes[away]["rush_att"],
         )
     )
-    # Retag from realized margin / pace.
+    # Pace / margin base tag (enriched later with pass/rush/te_vulture).
     if abs(blended) >= 14:
-        path["tag"] = "blowout"
+        path["pace_tag"] = "blowout"
     elif path["pace"] >= 52 and path["pass_tilt"] >= 0.55:
-        path["tag"] = "shootout"
+        path["pace_tag"] = "shootout"
     elif path["pace"] <= 40 or path["weather"] < 0.88:
-        path["tag"] = "grind"
+        path["pace_tag"] = "grind"
     else:
-        path["tag"] = "close"
+        path["pace_tag"] = "close"
+    path["tag"] = path["pace_tag"]
 
     boxes[home]["points"] = score_h
     boxes[away]["points"] = score_a
@@ -249,19 +254,46 @@ def _allocate_team_boxes(
 # ---------------------------------------------------------------------------
 
 
+def _share_or_none(player: _HasProj, attr: str | None) -> float | None:
+    """Return finite share in [0, 1+] if column present, else None."""
+    if not attr:
+        return None
+    raw = getattr(player, attr, None)
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val != val:  # NaN
+        return None
+    return val
+
+
 def _usage_weights(
     players: Sequence[_HasProj],
     team: str,
     positions: set[str],
+    *,
+    share_attr: str | None = None,
 ) -> list[tuple[int, float]]:
-    """(index, weight) for players on ``team`` in ``positions``; proj×boost."""
+    """(index, weight) for players on ``team`` in ``positions``.
+
+    Prefer optional usage prior ``share_attr`` (rush_share / target_share /
+    rz_share) × boost when present; otherwise fall back to proj_fp × boost.
+    """
     out: list[tuple[int, float]] = []
     for i, p in enumerate(players):
         if p.team != team:
             continue
         if (p.position or "").upper() not in positions:
             continue
-        w = max(0.01, float(p.proj_fp) * float(getattr(p, "boost", 1.0) or 1.0))
+        boost = float(getattr(p, "boost", 1.0) or 1.0)
+        share = _share_or_none(p, share_attr)
+        if share is not None:
+            w = max(0.01, share * boost)
+        else:
+            w = max(0.01, float(p.proj_fp) * boost)
         out.append((i, w))
     return out
 
@@ -287,8 +319,11 @@ def _distribute_skill(
     box: dict[str, float],
     rng: np.random.Generator,
     stats: list[StatLine],
-) -> None:
-    """Allocate team box to QB / RB / WR / TE StatLines in-place."""
+) -> float:
+    """Allocate team box to QB / RB / WR / TE StatLines in-place.
+
+    Returns TE share of team receiving TDs (for te_vulture tagging).
+    """
     # QB: all pass_yd / pass_td / INT; small rush share.
     qbs = _usage_weights(players, team, {"QB"})
     if qbs:
@@ -296,7 +331,6 @@ def _distribute_skill(
         shares = _dirichlet_like([w for _, w in qbs], rng, conc=60.0)
         for j, i in enumerate(idxs):
             sh = float(shares[j])
-            # Primary QB usually dominates — reinforce top weight.
             s = stats[i]
             stats[i] = StatLine(
                 pass_yd=s.pass_yd + box["pass_yd"] * sh,
@@ -310,7 +344,7 @@ def _distribute_skill(
                 fumbles_lost=s.fumbles_lost,
                 two_pt=s.two_pt,
             )
-        # QB rush: ~55% of team rush to QB is wrong; QBs get ~8–15% of rush yards.
+        # QB rush: QBs get ~8–15% of rush yards.
         qb_rush_frac = float(np.clip(rng.normal(0.12, 0.04), 0.04, 0.25))
         top_qb = max(qbs, key=lambda t: t[1])[0]
         s = stats[top_qb]
@@ -330,21 +364,31 @@ def _distribute_skill(
     else:
         rb_rush_frac = 1.0
 
-    # RB rush yards / rush TDs (+ light receiving).
-    rbs = _usage_weights(players, team, {"RB"})
+    # RB rush yards (rush_share) / rush TDs (rz_share else rush_share) + light receiving.
+    rbs = _usage_weights(players, team, {"RB"}, share_attr="rush_share")
+    rbs_td = _usage_weights(players, team, {"RB"}, share_attr="rz_share")
+    te_rec_td = 0.0
     if rbs:
         idxs = [i for i, _ in rbs]
         shares = _dirichlet_like([w for _, w in rbs], rng, conc=25.0)
+        # TD shares: prefer rz_share when present on any RB; else reuse rush shares.
+        if any(_share_or_none(players[i], "rz_share") is not None for i, _ in rbs_td):
+            td_idxs = [i for i, _ in rbs_td]
+            td_shares = _dirichlet_like([w for _, w in rbs_td], rng, conc=25.0)
+            td_map = {td_idxs[j]: float(td_shares[j]) for j in range(len(td_idxs))}
+        else:
+            td_map = {idxs[j]: float(shares[j]) for j in range(len(idxs))}
         rec_frac_rb = float(np.clip(rng.normal(0.22, 0.06), 0.08, 0.40))
         for j, i in enumerate(idxs):
             sh = float(shares[j])
+            sh_td = td_map.get(i, sh)
             s = stats[i]
             stats[i] = StatLine(
                 pass_yd=s.pass_yd,
                 pass_td=s.pass_td,
                 interceptions=s.interceptions,
                 rush_yd=s.rush_yd + box["rush_yd"] * rb_rush_frac * sh,
-                rush_td=s.rush_td + box["rush_td"] * (1.0 - 0.15) * sh,
+                rush_td=s.rush_td + box["rush_td"] * (1.0 - 0.15) * sh_td,
                 rec_yd=s.rec_yd + box["pass_yd"] * rec_frac_rb * sh * 0.35,
                 rec_td=s.rec_td + box["pass_td"] * rec_frac_rb * sh * 0.25,
                 receptions=s.receptions + box["receptions"] * rec_frac_rb * sh,
@@ -354,14 +398,23 @@ def _distribute_skill(
     else:
         rec_frac_rb = 0.15
 
-    # WR/TE: remaining receiving.
-    pass_catch = _usage_weights(players, team, {"WR", "TE"})
+    # WR/TE: remaining receiving — target_share for volume, rz_share for TDs.
+    pass_catch = _usage_weights(players, team, {"WR", "TE"}, share_attr="target_share")
+    pass_catch_td = _usage_weights(players, team, {"WR", "TE"}, share_attr="rz_share")
     remaining_rec = max(0.0, 1.0 - rec_frac_rb)
     if pass_catch:
         idxs = [i for i, _ in pass_catch]
         shares = _dirichlet_like([w for _, w in pass_catch], rng, conc=20.0)
+        if any(_share_or_none(players[i], "rz_share") is not None for i, _ in pass_catch_td):
+            td_idxs = [i for i, _ in pass_catch_td]
+            td_shares = _dirichlet_like([w for _, w in pass_catch_td], rng, conc=20.0)
+            td_map = {td_idxs[j]: float(td_shares[j]) for j in range(len(td_idxs))}
+        else:
+            td_map = {idxs[j]: float(shares[j]) for j in range(len(idxs))}
         for j, i in enumerate(idxs):
             sh = float(shares[j])
+            sh_td = td_map.get(i, sh)
+            add_td = box["pass_td"] * remaining_rec * sh_td
             s = stats[i]
             stats[i] = StatLine(
                 pass_yd=s.pass_yd,
@@ -370,11 +423,17 @@ def _distribute_skill(
                 rush_yd=s.rush_yd,
                 rush_td=s.rush_td,
                 rec_yd=s.rec_yd + box["pass_yd"] * remaining_rec * sh,
-                rec_td=s.rec_td + box["pass_td"] * remaining_rec * sh,
+                rec_td=s.rec_td + add_td,
                 receptions=s.receptions + box["receptions"] * remaining_rec * sh,
                 fumbles_lost=s.fumbles_lost,
                 two_pt=s.two_pt,
             )
+            if (players[i].position or "").upper() == "TE":
+                te_rec_td += add_td
+    team_pass_td = float(box["pass_td"]) * remaining_rec
+    if team_pass_td <= 1e-9:
+        return 0.0
+    return float(te_rec_td / team_pass_td)
 
 
 def _dst_fp(points_allowed: float, turnovers: float, sacks: float) -> float:
@@ -412,11 +471,14 @@ def _score_players(
     away: str,
     boxes: dict[str, dict[str, float]],
     rng: np.random.Generator,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
+    """Return (fps, max TE-of-pass-TD share across teams)."""
     n = len(players)
     stats = [StatLine() for _ in range(n)]
+    te_share_max = 0.0
     for team in (home, away):
-        _distribute_skill(players, team, boxes[team], rng, stats)
+        te_share = _distribute_skill(players, team, boxes[team], rng, stats)
+        te_share_max = max(te_share_max, te_share)
 
     fps = np.zeros(n, dtype=np.float64)
     for i, p in enumerate(players):
@@ -424,7 +486,6 @@ def _score_players(
         if pos == "DST":
             opp = away if p.team == home else home
             opp_box = boxes[opp]
-            own_forced = boxes[p.team]["interceptions"]  # weak proxy
             # Turnovers forced ≈ opponent INTs + opponent fumbles (from opp box).
             turnovers = opp_box["interceptions"] + opp_box["fumbles_lost"]
             # Opponent sacks_allowed on offense ≈ sacks by this DST
@@ -436,7 +497,37 @@ def _score_players(
             fps[i] = _k_fp(box["points"], n_td, rng)
         else:
             fps[i] = max(0.0, score_stats(stats[i]))
-    return fps
+    return fps, te_share_max
+
+
+def _compose_path_tags(
+    path: dict[str, Any],
+    *,
+    te_vulture: bool = False,
+    bring_back: bool = False,
+) -> list[str]:
+    """Build ordered tag list: style + pace + optional TE/bring-back."""
+    pass_rate = float(path.get("pass_rate") or 0.5)
+    if pass_rate >= 0.58:
+        style = "pass_heavy"
+    elif pass_rate <= 0.45:
+        style = "rush_heavy"
+    else:
+        style = "balanced"
+    pace = path.get("pace_tag") or path.get("tag") or "close"
+    tags = [style, pace]
+    if te_vulture:
+        tags.append("te_vulture")
+    if bring_back:
+        tags.append("bring_back")
+    # Dedup preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -452,16 +543,33 @@ def realize_game_path(
     spread: float | None = None,
     total: float | None = None,
     script_id: int = 0,
+    classic_bring_back: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Simulate one game path and return (realized_fp[n_players], summary).
 
     ``players`` may be Showdown ``Player`` or Classic ``ClassicPlayer`` for a
-    single game subset. Usage weights = proj_fp × boost within team/position.
+    single game subset. Usage prefers rush_share/target_share/rz_share when set.
     """
     home, away = _resolve_teams(players, teams)
     path = sample_game_path(rng, spread=spread, total=total, script_id=script_id)
     boxes = _allocate_team_boxes(path, home, away, rng)
-    fps = _score_players(players, home, away, boxes, rng)
+    fps, te_share = _score_players(players, home, away, boxes, rng)
+
+    te_vulture = te_share >= 0.35
+    hp = float(path.get("home_points") or 0.0)
+    ap = float(path.get("away_points") or 0.0)
+    # Classic shootout / dual-scoring paths favor bring-back stacks.
+    bring_back = bool(
+        classic_bring_back
+        and (
+            path.get("pace_tag") == "shootout"
+            or (hp >= 24 and ap >= 24)
+            or (hp + ap >= 52)
+        )
+    )
+    tags = _compose_path_tags(path, te_vulture=te_vulture, bring_back=bring_back)
+    path["tags"] = tags
+    path["tag"] = "|".join(tags)
 
     # Top scorers for summary.
     order = np.argsort(-fps)
@@ -476,6 +584,7 @@ def realize_game_path(
     summary: dict[str, Any] = {
         "script_id": script_id,
         "tag": path["tag"],
+        "tags": tags,
         "possessions": path["n_possessions"],
         "final_margin": round(float(path["final_margin"]), 2),
         "pass_rate": round(float(path["pass_rate"]), 3),
@@ -485,6 +594,7 @@ def realize_game_path(
         "away_points": path.get("away_points", 0.0),
         "pace": round(float(path["pace"]), 2),
         "pass_tilt": round(float(path["pass_tilt"]), 3),
+        "te_td_share": round(float(te_share), 3),
         "top_scorers": top,
         "vegas_spread": spread,
         "vegas_total": total,
@@ -520,6 +630,7 @@ def realize_classic_slate(
         games.setdefault(gk, []).append(i)
 
     tags: list[str] = []
+    tag_lists: list[list[str]] = []
     game_summaries: list[dict] = []
     for g_i, (gk, idxs) in enumerate(sorted(games.items())):
         sub = [players[i] for i in idxs]
@@ -533,13 +644,39 @@ def realize_classic_slate(
             spread=sp,
             total=tot,
             script_id=sim_id * 100 + g_i,
+            classic_bring_back=True,
         )
         for j, pi in enumerate(idxs):
             fps[pi] = sub_fp[j]
         tags.append(summ["tag"])
-        game_summaries.append({"game": gk, **{k: summ[k] for k in ("tag", "possessions", "final_margin", "pass_rate")}})
+        tag_lists.append(list(summ.get("tags") or []))
+        game_summaries.append(
+            {
+                "game": gk,
+                **{
+                    k: summ[k]
+                    for k in ("tag", "tags", "possessions", "final_margin", "pass_rate")
+                    if k in summ
+                },
+            }
+        )
 
-    tag = Counter(tags).most_common(1)[0][0] if tags else "mixed"
+    # Slate tag = union of major script families + mode pace tag.
+    flat: list[str] = []
+    for tl in tag_lists:
+        flat.extend(tl)
+    if not flat and tags:
+        flat = tags
+    maj_priority = ("pass_heavy", "rush_heavy", "balanced", "te_vulture", "bring_back",
+                    "shootout", "grind", "blowout", "close")
+    counts = Counter(flat)
+    composed: list[str] = []
+    for m in maj_priority:
+        if counts.get(m):
+            composed.append(m)
+    if not composed:
+        composed = [Counter(tags).most_common(1)[0][0]] if tags else ["mixed"]
+    tag = "|".join(composed)
     order = np.argsort(-fps)
     top = [
         {
@@ -552,6 +689,7 @@ def realize_classic_slate(
     summary: dict[str, Any] = {
         "script_id": sim_id,
         "tag": tag,
+        "tags": composed,
         "possessions": int(sum(g.get("possessions", 0) for g in game_summaries)),
         "final_margin": None,
         "pass_rate": float(np.mean([g["pass_rate"] for g in game_summaries])) if game_summaries else 0.0,
@@ -573,6 +711,7 @@ def write_path_summaries_csv(path: Any, summaries: Sequence[dict[str, Any]], max
     fieldnames = [
         "script_id",
         "tag",
+        "tags",
         "possessions",
         "final_margin",
         "pass_rate",
@@ -580,6 +719,7 @@ def write_path_summaries_csv(path: Any, summaries: Sequence[dict[str, Any]], max
         "away",
         "home_points",
         "away_points",
+        "te_td_share",
         "top1_name",
         "top1_fp",
         "top2_name",
@@ -592,9 +732,15 @@ def write_path_summaries_csv(path: Any, summaries: Sequence[dict[str, Any]], max
         w.writeheader()
         for s in rows:
             tops = s.get("top_scorers") or []
+            tags = s.get("tags") or []
+            if isinstance(tags, str):
+                tags_str = tags
+            else:
+                tags_str = "|".join(tags)
             row = {
                 "script_id": s.get("script_id"),
                 "tag": s.get("tag"),
+                "tags": tags_str,
                 "possessions": s.get("possessions"),
                 "final_margin": s.get("final_margin"),
                 "pass_rate": s.get("pass_rate"),
@@ -602,6 +748,7 @@ def write_path_summaries_csv(path: Any, summaries: Sequence[dict[str, Any]], max
                 "away": s.get("away", ""),
                 "home_points": s.get("home_points", ""),
                 "away_points": s.get("away_points", ""),
+                "te_td_share": s.get("te_td_share", ""),
                 "top1_name": tops[0]["name"] if len(tops) > 0 else "",
                 "top1_fp": tops[0]["fp"] if len(tops) > 0 else "",
                 "top2_name": tops[1]["name"] if len(tops) > 1 else "",
@@ -610,3 +757,71 @@ def write_path_summaries_csv(path: Any, summaries: Sequence[dict[str, Any]], max
                 "top3_fp": tops[2]["fp"] if len(tops) > 2 else "",
             }
             w.writerow(row)
+
+
+def write_script_projections_csv(
+    path: Any,
+    players: Sequence[_HasProj],
+    path_records: Sequence[tuple[np.ndarray, Sequence[str]]],
+) -> None:
+    """Per-player mean / p10 / p90 FP by tag and overall (inspection only)."""
+    import csv
+    from pathlib import Path
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path_records:
+        path.write_text(
+            "dk_id,name,position,team,tag,n,mean_fp,p10_fp,p90_fp\n",
+            encoding="utf-8",
+        )
+        return
+
+    # Collect FP lists keyed by (player_idx, tag)
+    by_tag: dict[str, list[np.ndarray]] = {"overall": []}
+    for fp, tags in path_records:
+        by_tag["overall"].append(fp)
+        seen: set[str] = set()
+        for t in tags:
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            by_tag.setdefault(t, []).append(fp)
+
+    fieldnames = [
+        "dk_id",
+        "name",
+        "position",
+        "team",
+        "tag",
+        "n",
+        "mean_fp",
+        "p10_fp",
+        "p90_fp",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        # Stable tag order: overall first, then alpha
+        tag_order = ["overall"] + sorted(t for t in by_tag if t != "overall")
+        for tag in tag_order:
+            arrs = by_tag[tag]
+            if not arrs:
+                continue
+            stacked = np.stack(arrs, axis=0)  # (n_paths, n_players)
+            n_paths = stacked.shape[0]
+            for i, p in enumerate(players):
+                col = stacked[:, i]
+                w.writerow(
+                    {
+                        "dk_id": p.dk_id,
+                        "name": p.name,
+                        "position": p.position,
+                        "team": p.team,
+                        "tag": tag,
+                        "n": n_paths,
+                        "mean_fp": round(float(np.mean(col)), 3),
+                        "p10_fp": round(float(np.percentile(col, 10)), 3),
+                        "p90_fp": round(float(np.percentile(col, 90)), 3),
+                    }
+                )

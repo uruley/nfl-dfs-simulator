@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Sequence
+
+from nfl_dfs.portfolio import GPP_MAJOR_TAGS, major_tags_for_lineup
 
 from nfl_dfs.classic_rules import (
     SALARY_CAP,
@@ -24,6 +26,7 @@ class ClassicPortfolioResult:
     script_tags: dict[str, int]
     n_unique_scripts: int
     n_unique_lineups: int
+    major_tag_counts: dict[str, int] | None = None
 
 
 def _would_exceed(
@@ -112,9 +115,12 @@ def build_classic_portfolio(
     size: int = 20,
     max_exposure: float = 0.40,
     player_pool: Sequence[ClassicPlayer] | None = None,
+    *,
+    gpp: bool = True,
+    min_per_tag: int = 2,
 ) -> ClassicPortfolioResult:
     if size <= 0:
-        return ClassicPortfolioResult([], {}, {}, 0, 0)
+        return ClassicPortfolioResult([], {}, {}, 0, 0, {})
 
     best_by_key: dict[str, ClassicLineup] = {}
     for lu in candidates:
@@ -123,7 +129,7 @@ def build_classic_portfolio(
             best_by_key[k] = lu
     unique = list(best_by_key.values())
     if not unique:
-        return ClassicPortfolioResult([], {}, {}, 0, 0)
+        return ClassicPortfolioResult([], {}, {}, 0, 0, {})
 
     pool: list[ClassicPlayer] = list(player_pool) if player_pool is not None else []
     if not pool:
@@ -138,6 +144,7 @@ def build_classic_portfolio(
     used_keys: set[str] = set()
     used_scripts: set[int] = set()
     tag_counts: Counter = Counter()
+    major_tag_counts: Counter = Counter()
 
     def try_add(lu: ClassicLineup, cap: float) -> bool:
         if lu.key() in used_keys:
@@ -149,9 +156,29 @@ def build_classic_portfolio(
         if lu.script_id >= 0:
             used_scripts.add(lu.script_id)
         tag_counts[lu.tag or "unknown"] += 1
+        for mt in major_tags_for_lineup(lu.tag):
+            major_tag_counts[mt] += 1
         for pid in lu.player_ids():
             exp[pid] += 1
         return True
+
+    # Pass GPP-0: seed min_per_tag from each major script family
+    if gpp and min_per_tag > 0:
+        by_major: dict[str, list[ClassicLineup]] = defaultdict(list)
+        for lu in unique:
+            for m in major_tags_for_lineup(lu.tag):
+                by_major[m].append(lu)
+        for m in by_major:
+            by_major[m].sort(key=lambda x: -x.sim_fp)
+        for maj in GPP_MAJOR_TAGS:
+            if maj not in by_major:
+                continue
+            taken = 0
+            for lu in by_major[maj]:
+                if taken >= min_per_tag or len(selected) >= size:
+                    break
+                if try_add(lu, max_exposure):
+                    taken += 1
 
     # Pass A: highest sim_fp first
     for lu in sorted(unique, key=lambda x: -x.sim_fp):
@@ -210,4 +237,5 @@ def build_classic_portfolio(
         script_tags=dict(tag_counts),
         n_unique_scripts=len(used_scripts),
         n_unique_lineups=len(used_keys),
+        major_tag_counts=dict(major_tag_counts),
     )

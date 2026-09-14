@@ -18,6 +18,7 @@ Scout (free intel) → Projections (means/ceilings/own) → Sim Lab (CLI + gates
 | Contest meta | `fixtures/contest_sample.json` / `exports/contest-*.json` | Lab (spread, total, field) |
 | Sim portfolio | `exports/lineups-*-upload.csv` | `sim-showdown` / `sim-classic` (Lab) |
 | Path summaries | `exports/path-summaries.csv` | `sim-showdown` / `sim-classic` (scorepath) |
+| Script projections | `exports/script-projections.csv` | per-tag mean/p10/p90 FP (inspection only) |
 | Priced metrics | `exports/sim-showdown-priced.csv` | `sim-showdown` (Lab) |
 | Gates | `backtests/next-build-gates.json` | `flashback` (Lab) |
 | Delivered uploads | `uploads/lineups-*-vN.csv` | Builder (never overwritten) |
@@ -30,17 +31,23 @@ cd /home/box/nfl-dfs && source .venv/bin/activate
 # 1) Ingest DK lobby salary file
 python -m nfl_dfs ingest-dk-salary --input uploads/dk-salary.csv --out exports/pool.csv
 
-# 2) Showdown sim (Lab) — Vegas + field price + entry IDs
+# 2) Showdown sim (Lab) — GPP script buckets + Vegas + field price + entry IDs
 python -m nfl_dfs sim-showdown --pool exports/pool.csv --projections exports/projections.csv \
   --n-scripts 2000 --portfolio 20 --exposure 0.40 --seed 7 --out exports/ \
-  --engine scorepath --progress-every 500 \
+  --engine scorepath --gpp --min-per-tag 2 --progress-every 500 \
   --spread -2.5 --total 48.5 \
   --field-sims 1000 --ownership exports/ownership.csv \
   --field-size 1000 --entry-fee 5 \
   --entry-id-start 100001 \
   --read "Player Name=1.15"
 # --engine legacy  → old mean-tilt residuals
-# outputs include exports/path-summaries.csv
+# --no-gpp         → disable tag-bucket portfolio seeding
+# outputs: path-summaries.csv, script-projections.csv, lineups_per_major_tag in summary
+
+# 2a) GPP 20-lineup demo (fixtures)
+python -m nfl_dfs sim-showdown --pool fixtures/showdown_pool.csv \
+  --projections fixtures/projections.csv --n-scripts 200 --portfolio 20 \
+  --exposure 0.40 --seed 7 --engine scorepath --gpp --out /tmp/dfs-gpp
 
 # 2b) Contest meta JSON can carry spread/total/field_size/entry_fee
 python -m nfl_dfs sim-showdown --pool exports/pool.csv --projections exports/projections.csv \

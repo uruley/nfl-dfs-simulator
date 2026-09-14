@@ -54,6 +54,25 @@ python -m nfl_dfs sim-showdown \
 
 `--engine scorepath` (default) uses the possession model; `--engine legacy` keeps mean-tilt residuals. Optional `--progress-every 100` logs to stderr.
 
+**GPP 20-lineup portfolio (script buckets, default):** each path keeps its own tag family (`pass_heavy` / `rush_heavy` / `balanced` + pace tag + optional `te_vulture`). The portfolio seeds `--min-per-tag` (default 2) strong lineups from each major family first, then fills remaining slots by leverage / sim_fp — never “top 20 by average FP.” Exposure cap still applies.
+
+```bash
+python -m nfl_dfs sim-showdown \
+  --pool fixtures/showdown_pool.csv \
+  --projections fixtures/projections.csv \
+  --n-scripts 200 \
+  --portfolio 20 \
+  --exposure 0.40 \
+  --seed 7 \
+  --engine scorepath \
+  --gpp --min-per-tag 2 \
+  --out /tmp/dfs-gpp
+```
+
+Outputs include `path-summaries.csv` (rich tags), `script-projections.csv` (per-player mean/p10/p90 by tag — inspection only), and summary lines `lineups_per_major_tag=...` plus a warning if one tag is >50% of the portfolio. Use `--no-gpp` to disable bucket seeding.
+
+Optional projection columns `rush_share`, `target_share`, `rz_share` (0–1) drive usage when present; otherwise usage falls back to `proj_fp × boost`.
+
 **Vegas-aware scripts** (optional): bias pace / pass_tilt / margin from priors.
 
 ```bash
@@ -177,7 +196,7 @@ Outputs: `scratch-watch-last.json`, `scratch-watch-report.md`, and `scratch-hits
 
 ## Method (short)
 
-- **Score-path engine (default, `--engine scorepath`):** sample a possession-level game path (pace / margin / pass rate from Vegas priors + game state) → allocate team yards/TDs/turnovers → distribute to players via projection usage shares (`proj_fp × boost`) → DK FP via `scoring.py` → **best legal lineup for that realized FP vector**. Portfolio still exposure-capped ~40% and diversifies across path tags. Emits `path-summaries.csv`.
+- **Score-path engine (default, `--engine scorepath`):** sample a possession-level game path (pace / margin / pass rate from Vegas priors + game state) → allocate team yards/TDs/turnovers → distribute to players via usage priors (`rush_share` / `target_share` / `rz_share` when present, else `proj_fp × boost`) → DK FP via `scoring.py` → **best legal lineup for that realized FP vector**. GPP portfolio seeds across script-tag buckets (pass_heavy / rush_heavy / te_vulture / bring_back) with exposure caps ~40%. Emits `path-summaries.csv` + `script-projections.csv`.
 - **Legacy (`--engine legacy`):** previous mean-tilt + correlated residuals (Showdown / Classic).
 - **Showdown:** CPT+5FLEX best lineup(s) per path; optional field sim pricing.
 - **Classic:** per-game scorepath merge across slate games, then best 9-slot lineup.

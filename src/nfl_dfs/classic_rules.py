@@ -30,6 +30,9 @@ class ClassicPlayer:
     game_key: str = ""  # normalized sorted "A@B" for multi-game check
     own_est: float | None = None
     boost: float = 1.0
+    rush_share: float | None = None
+    target_share: float | None = None
+    rz_share: float | None = None
     eligible_slots: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
@@ -225,6 +228,9 @@ def load_projections_csv(path: Path) -> dict[str, dict]:
                 "own_est": own,
                 "game_info": game_info,
                 "game_key": game_key,
+                "rush_share": safe_float(row.get("rush_share")),
+                "target_share": safe_float(row.get("target_share")),
+                "rz_share": safe_float(row.get("rz_share")),
             }
     return out
 
@@ -254,6 +260,9 @@ def merge_pool_proj(pool: list[dict], proj: dict[str, dict]) -> list[ClassicPlay
                 std=float(std),
                 own_est=pr.get("own_est"),
                 game_key=game_key,
+                rush_share=pr.get("rush_share"),
+                target_share=pr.get("target_share"),
+                rz_share=pr.get("rz_share"),
             )
         )
     return merged

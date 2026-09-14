@@ -20,6 +20,7 @@ class PortfolioResult:
     script_tags: dict[str, int]
     n_unique_scripts: int
     n_unique_lineups: int
+    major_tag_counts: dict[str, int] | None = None
 
 
 def _would_exceed(
@@ -144,20 +145,46 @@ def _repair_lineup(
     )
 
 
+# Major GPP script families to seed first (order matters).
+GPP_MAJOR_TAGS = ("pass_heavy", "rush_heavy", "te_vulture", "bring_back")
+
+
+def parse_lineup_tags(tag: str | None) -> list[str]:
+    if not tag:
+        return []
+    parts = [x.strip() for x in str(tag).replace(",", "|").split("|") if x.strip()]
+    return parts
+
+
+def major_tags_for_lineup(tag: str | None) -> list[str]:
+    """Return GPP bucket keys present on a lineup tag string."""
+    parts = parse_lineup_tags(tag)
+    majors = [t for t in parts if t in GPP_MAJOR_TAGS]
+    return majors
+
+
 def build_portfolio(
     candidates: Sequence[Lineup],
     size: int = 20,
     max_exposure: float = 0.40,
     player_pool: Sequence[Player] | None = None,
     own_map: dict[str, float] | None = None,
+    *,
+    gpp: bool = True,
+    min_per_tag: int = 2,
 ) -> PortfolioResult:
     """Greedy portfolio: distinct keys, CPT diversity, exposure + field-chalk.
+
+    When ``gpp`` (default), seed ``min_per_tag`` strong lineups from each major
+    script family (pass_heavy / rush_heavy / te_vulture / bring_back) before
+    filling remaining slots by sim_fp / leverage / chalk diversity. Never
+    collapse to top-N by average FP alone.
 
     When ``own_map`` is provided, prefer lineups that are diverse vs field chalk
     (high-ownership stacks) while still enforcing ~40% self-exposure caps.
     """
     if size <= 0:
-        return PortfolioResult([], {}, {}, 0, 0)
+        return PortfolioResult([], {}, {}, 0, 0, {})
 
     best_by_key: dict[str, Lineup] = {}
     for lu in candidates:
@@ -166,7 +193,7 @@ def build_portfolio(
             best_by_key[k] = lu
     unique = list(best_by_key.values())
     if not unique:
-        return PortfolioResult([], {}, {}, 0, 0)
+        return PortfolioResult([], {}, {}, 0, 0, {})
 
     pool: list[Player] = list(player_pool) if player_pool is not None else []
     if not pool:
@@ -189,6 +216,8 @@ def build_portfolio(
     used_keys: set[str] = set()
     used_scripts: set[int] = set()
     tag_counts: Counter = Counter()
+    # Count lineup membership by major GPP family (a lineup can hit multiple).
+    major_tag_counts: Counter = Counter()
 
     def try_add(lu: Lineup, cap: float) -> bool:
         if lu.key() in used_keys:
@@ -200,9 +229,32 @@ def build_portfolio(
         if lu.script_id >= 0:
             used_scripts.add(lu.script_id)
         tag_counts[lu.tag or "unknown"] += 1
+        for mt in major_tags_for_lineup(lu.tag):
+            major_tag_counts[mt] += 1
         for pid in lu.player_ids():
             exp[pid] += 1
         return True
+
+    # Pass GPP-0: seed min_per_tag from each major script family first.
+    if gpp and min_per_tag > 0:
+        by_major: dict[str, list[Lineup]] = defaultdict(list)
+        for lu in unique:
+            majors = major_tags_for_lineup(lu.tag)
+            for m in majors:
+                by_major[m].append(lu)
+        for m in by_major:
+            by_major[m].sort(
+                key=lambda x: (-x.sim_fp, _field_chalk_penalty(x, own_map))
+            )
+        for maj in GPP_MAJOR_TAGS:
+            if maj not in by_major:
+                continue
+            taken = 0
+            for lu in by_major[maj]:
+                if taken >= min_per_tag or len(selected) >= size:
+                    break
+                if try_add(lu, max_exposure):
+                    taken += 1
 
     # Pass A: round-robin CPT (among each CPT's list, prefer lower chalk)
     cpt_order = sorted(
@@ -275,4 +327,5 @@ def build_portfolio(
         script_tags=dict(tag_counts),
         n_unique_scripts=len(used_scripts),
         n_unique_lineups=len(used_keys),
+        major_tag_counts=dict(major_tag_counts),
     )

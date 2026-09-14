@@ -32,6 +32,9 @@ class Player:
     own_est: float | None = None
     cpt_salary: int = 0
     boost: float = 1.0  # user read multiplier on sampled usage/FP mean
+    rush_share: float | None = None  # optional 0–1 rush usage prior
+    target_share: float | None = None  # optional 0–1 target share prior
+    rz_share: float | None = None  # optional 0–1 red-zone TD prior
 
     def __post_init__(self) -> None:
         if not self.cpt_salary:
@@ -165,6 +168,9 @@ def load_projections_csv(path: Path) -> dict[str, dict]:
                 "ceiling": ceiling,
                 "own_est": own,
                 "cpt_salary": int(round(cpt_sal)) if cpt_sal is not None else None,
+                "rush_share": safe_float(row.get("rush_share")),
+                "target_share": safe_float(row.get("target_share")),
+                "rz_share": safe_float(row.get("rz_share")),
             }
     return out
 
@@ -200,6 +206,9 @@ def merge_pool_proj(pool: list[dict], proj: dict[str, dict]) -> list[Player]:
                 can_flex=can_flex,
                 own_est=pr.get("own_est"),
                 cpt_salary=int(cpt_sal),
+                rush_share=pr.get("rush_share"),
+                target_share=pr.get("target_share"),
+                rz_share=pr.get("rz_share"),
             )
         )
     return merged
