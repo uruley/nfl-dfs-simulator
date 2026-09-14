@@ -16,16 +16,26 @@ from nfl_dfs.backtest import (
     score_portfolio,
     write_calibration_notes,
 )
-from nfl_dfs.contest import ContestConfig, price_lineups
+from nfl_dfs.contest import (
+    ContestConfig,
+    build_own_map,
+    field_sim_price,
+    load_contest_meta,
+    load_ownership_csv,
+    price_lineups,
+)
 from nfl_dfs.optimize import build_lineups_by_cpt
 from nfl_dfs.portfolio import build_portfolio
 from nfl_dfs.scripts import prepare_arrays, sample_outcomes, sample_scripts, script_player_means
 from nfl_dfs.showdown_rules import (
     SALARY_CAP,
     UPLOAD_HEADER,
+    UPLOAD_HEADER_ENTRY_ID,
     apply_reads,
+    load_entry_ids,
     load_pool_csv,
     load_projections_csv,
+    make_entry_ids,
     merge_pool_proj,
     write_upload_csv,
 )
@@ -42,6 +52,25 @@ def _parse_reads(raw: list[str] | None) -> dict[str, float]:
         k, v = item.rsplit("=", 1)
         out[k.strip()] = float(v)
     return out
+
+
+def _resolve_entry_ids(args: argparse.Namespace, n: int) -> list[str] | None:
+    """Return entry IDs for upload, or None for bare format."""
+    if getattr(args, "entry_ids", None):
+        ids = load_entry_ids(Path(args.entry_ids))
+        if len(ids) < n:
+            # Pad with sequential after last numeric if possible
+            start = 1
+            if ids:
+                try:
+                    start = int(ids[-1]) + 1
+                except ValueError:
+                    start = len(ids) + 1
+            ids = ids + make_entry_ids(n - len(ids), start)
+        return ids[:n]
+    if getattr(args, "entry_id_start", None) not in (None, ""):
+        return make_entry_ids(n, args.entry_id_start)
+    return None
 
 
 def cmd_sim_showdown(args: argparse.Namespace) -> int:
@@ -73,9 +102,47 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     reads = _parse_reads(args.read)
     apply_reads(players, reads)
 
+    # Vegas / contest meta
+    contest: ContestConfig | None = None
+    spread = args.spread
+    total = args.total
+    if args.contest_meta:
+        contest = load_contest_meta(Path(args.contest_meta))
+        if spread is None:
+            spread = contest.spread
+        if total is None:
+            total = contest.total
+    if args.field_size or args.entry_fee:
+        contest = contest or ContestConfig()
+        if args.field_size:
+            contest.field_size = args.field_size
+            # rebuild default prizes for new field if user didn't supply prizes
+            if not args.contest_meta:
+                contest.prizes = []
+                contest.__post_init__()
+        if args.entry_fee:
+            contest.entry_fee = args.entry_fee
+            if not args.contest_meta:
+                contest.prizes = []
+                contest.__post_init__()
+    if contest is None and (args.field_sims or args.field_size or args.entry_fee):
+        contest = ContestConfig(
+            field_size=args.field_size or 1000,
+            entry_fee=args.entry_fee or 5.0,
+        )
+    if contest is not None:
+        contest.spread = spread
+        contest.total = total
+
+    # Ownership
+    ownership_extra: dict[str, float] = {}
+    if args.ownership:
+        ownership_extra = load_ownership_csv(Path(args.ownership))
+    own_map = build_own_map(players, ownership_extra or None)
+
     rng = np.random.default_rng(args.seed)
     teams, teams_idx, pos_codes, stds = prepare_arrays(players)
-    scripts = sample_scripts(args.n_scripts, rng)
+    scripts = sample_scripts(args.n_scripts, rng, spread=spread, total=total)
 
     candidates = []
     tag_counts: Counter = Counter()
@@ -96,24 +163,46 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     n_built = len(candidates)
     sim_freq = {k: c / n_built for k, c in freq_counts.items()}
 
-    contest = None
-    if args.field_size or args.entry_fee:
-        contest = ContestConfig(
-            field_size=args.field_size or 1000,
-            entry_fee=args.entry_fee or 5.0,
+    field_sims = int(args.field_sims or 0)
+    if field_sims > 0:
+        contest = contest or ContestConfig()
+        priced = field_sim_price(
+            candidates,
+            players,
+            contest=contest,
+            own_map=own_map,
+            n_field=field_sims,
+            rng=rng,
+            sim_freq=sim_freq,
         )
-    priced = price_lineups(candidates, players, contest=contest, sim_freq=sim_freq)
+    else:
+        priced = price_lineups(
+            candidates, players, contest=contest, sim_freq=sim_freq, own_map=own_map
+        )
 
-    leverage_map = {p.lineup.key(): p.leverage for p in priced}
+    # Rank for portfolio: prefer field-sim EV / leverage, then sim_fp
+    score_map = {
+        p.lineup.key(): (
+            p.est_EV if field_sims > 0 else p.leverage,
+            p.win_rate,
+            p.leverage,
+            p.lineup.sim_fp,
+        )
+        for p in priced
+    }
     ranked_for_port = sorted(
         candidates,
-        key=lambda lu: (-leverage_map.get(lu.key(), 0.0), -lu.sim_fp),
+        key=lambda lu: score_map.get(
+            lu.key(), (0.0, 0.0, 0.0, lu.sim_fp)
+        ),
+        reverse=True,
     )
     port = build_portfolio(
         ranked_for_port,
         size=args.portfolio,
         max_exposure=args.exposure,
         player_pool=players,
+        own_map=own_map,
     )
 
     if len(port.lineups) < args.portfolio:
@@ -122,22 +211,26 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    entry_ids = _resolve_entry_ids(args, len(port.lineups))
     upload_path = out_dir / "lineups-showdown-upload.csv"
-    write_upload_csv(upload_path, port.lineups)
+    write_upload_csv(upload_path, port.lineups, entry_ids=entry_ids)
+    header_used = UPLOAD_HEADER_ENTRY_ID if entry_ids is not None else UPLOAD_HEADER
 
     id_to_name = {p.dk_id: p.name for p in players}
     summary_path = out_dir / "sim-showdown-summary.txt"
     lines = [
-        "NFL DFS — Showdown sim v1",
+        "NFL DFS — Showdown sim v2 (SaberSim-like)",
         f"players={len(players)}  n_scripts={args.n_scripts}  built={n_built}  seed={args.seed}",
         f"teams={','.join(teams)}  salary_cap={SALARY_CAP}  exposure_cap={args.exposure}",
+        f"vegas_spread={spread}  vegas_total={total}",
+        f"field_sims={field_sims}  ownership_players={len(own_map)}",
         f"portfolio={len(port.lineups)}  unique_scripts={port.n_unique_scripts}  "
         f"unique_lineups={port.n_unique_lineups}",
         f"script_tags_sampled={dict(tag_counts)}",
         f"script_tags_portfolio={port.script_tags}",
         f"reads={reads or '{}'}",
         "",
-        "Upload header: " + ",".join(UPLOAD_HEADER),
+        "Upload header: " + ",".join(header_used),
         f"Upload CSV: {upload_path}",
         "",
         "Player exposures (portfolio):",
@@ -145,11 +238,12 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
     for pid, exp in sorted(port.exposures.items(), key=lambda x: -x[1]):
         lines.append(f"  {exp:6.1%}  {id_to_name.get(pid, pid)} ({pid})")
     lines.append("")
-    lines.append("Top priced leverage lineups (among candidates):")
+    lines.append("Top priced lineups (among candidates):")
     for i, pr in enumerate(priced[:8]):
         lu = pr.lineup
         lines.append(
-            f"  #{i+1} lev={pr.leverage:+.3f} chalk={pr.chalk_own:.2f} "
+            f"  #{i+1} EV={pr.est_EV:+.2f} win={pr.win_rate:.3f} cash={pr.est_cash_rate:.3f} "
+            f"lev={pr.leverage:+.3f} chalk={pr.chalk_own:.2f} "
             f"sim_fp={lu.sim_fp:.1f} sal={lu.salary} tag={lu.tag} "
             f"CPT={lu.cpt.name} [{pr.notes}]"
         )
@@ -172,14 +266,55 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
                 {"dk_id": pid, "name": id_to_name.get(pid, pid), "exposure": round(exp, 4)}
             )
 
+    # Priced metrics CSV for Lab / Builder
+    priced_path = out_dir / "sim-showdown-priced.csv"
+    with priced_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "key",
+                "cpt",
+                "sim_fp",
+                "salary",
+                "win_rate",
+                "top1_rate",
+                "cash_rate",
+                "leverage",
+                "chalk_own",
+                "est_EV",
+                "notes",
+            ],
+        )
+        w.writeheader()
+        for pr in priced[:200]:
+            w.writerow(
+                {
+                    "key": pr.lineup.key(),
+                    "cpt": pr.lineup.cpt.name,
+                    "sim_fp": round(pr.lineup.sim_fp, 3),
+                    "salary": pr.lineup.salary,
+                    "win_rate": pr.win_rate,
+                    "top1_rate": pr.top1_rate,
+                    "cash_rate": pr.est_cash_rate,
+                    "leverage": pr.leverage,
+                    "chalk_own": pr.chalk_own,
+                    "est_EV": pr.est_EV,
+                    "notes": pr.notes,
+                }
+            )
+
     meta = {
         "n_scripts": args.n_scripts,
         "n_built": n_built,
         "portfolio": len(port.lineups),
         "seed": args.seed,
         "exposure_cap": args.exposure,
+        "vegas_spread": spread,
+        "vegas_total": total,
+        "field_sims": field_sims,
         "script_tags_portfolio": port.script_tags,
         "upload": str(upload_path),
+        "upload_format": "entry-id" if entry_ids is not None else "bare",
     }
     (out_dir / "sim-showdown-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -395,6 +530,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--field-size", type=int, default=0, help="Optional contest field size")
     p.add_argument("--entry-fee", type=float, default=0.0, help="Optional contest entry fee")
+    p.add_argument(
+        "--field-sims",
+        type=int,
+        default=0,
+        help="Ownership-weighted opponent lineups for contest pricing (0=crude leverage)",
+    )
+    p.add_argument(
+        "--ownership",
+        default="",
+        help="Optional ownership CSV (dk_id,own_est); else uses projections own_est",
+    )
+    p.add_argument(
+        "--spread",
+        type=float,
+        default=None,
+        help="Vegas home spread (negative = home favored); biases scripts",
+    )
+    p.add_argument(
+        "--total",
+        type=float,
+        default=None,
+        help="Vegas game total (O/U); biases pace/pass_tilt",
+    )
+    p.add_argument(
+        "--contest-meta",
+        default="",
+        help="Optional contest JSON (field_size, entry_fee, spread, total, prizes)",
+    )
+    p.add_argument(
+        "--entry-ids",
+        default="",
+        help="CSV of Entry IDs for multi-entry upload format",
+    )
+    p.add_argument(
+        "--entry-id-start",
+        default="",
+        help="Generate sequential Entry IDs starting at this value",
+    )
     p.add_argument("--actuals", default="", help="Optional actual FP CSV for backtest")
     p.add_argument(
         "--backtest-out",

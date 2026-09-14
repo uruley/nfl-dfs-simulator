@@ -1,15 +1,17 @@
 # NFL DFS — DraftKings Simulator
 
-Local Python package for the desk DFS method:
+Local Python package for the desk DFS method (SaberSim-shaped engine + Grok Bot desk OS):
 
-1. **Simulate** game scripts (Showdown) or multi-game correlated scripts (Classic).
+1. **Simulate** game scripts (Showdown, Vegas-aware) or multi-game correlated scripts (Classic).
 2. **Optimize** legal DK lineups under salary + roster rules.
-3. **Portfolio** with default **~40%** player exposure.
-4. **Ingest** real DK salary-file CSVs into normalized pools.
-5. **Contest Flashback** — score uploads vs actuals; emit next-build gates (never mutates `uploads/`).
+3. **Price** vs an ownership-weighted field (win/cash/EV) or crude leverage.
+4. **Portfolio** with default **~40%** player exposure + diversify vs field chalk.
+5. **Ingest** real DK salary-file CSVs into normalized pools.
+6. **Contest Flashback** — score uploads vs actuals; emit next-build gates (never mutates `uploads/`).
 
 Hard rules: `DK-NFL-SHOWDOWN-RULES.md`, `DK-NFL-CLASSIC-RULES.md`.  
-Projection contracts: `PROJECTIONS.md`. Salary ingest: `INGEST.md`. Desk map: `DESK.md`.
+Projection contracts: `PROJECTIONS.md`. Salary ingest: `INGEST.md`.  
+Desk map: `DESK.md` · Operating CLI: `OPERATING.md` · Roadmap: `ROADMAP.md`.
 
 **Live slate lock is ON** — use fixtures / saved exports only; do not scrape live DK for production lineups.
 
@@ -27,7 +29,7 @@ Requires Python 3.11+ and `numpy`. No paid APIs; tests need no network.
 
 | Command | Purpose |
 |---------|---------|
-| `sim-showdown` | Showdown scripts → CPT+FLEX lineups → portfolio |
+| `sim-showdown` | Showdown scripts → CPT+FLEX → field price → portfolio |
 | `sim-classic` | Classic multi-game sims → 9-slot lineups → portfolio |
 | `ingest-dk-salary` | DK salary CSV → normalized pool CSV |
 | `flashback` | Score lineups vs actuals → scores + summary + gates |
@@ -47,9 +49,54 @@ python -m nfl_dfs sim-showdown \
   --out /home/box/nfl-dfs/exports
 ```
 
-Optional: `--read NAME=1.2`, `--field-size` / `--entry-fee`, `--actuals`, `--backtest-out`.
+**Vegas-aware scripts** (optional): bias pace / pass_tilt / margin from priors.
 
-Outputs: `lineups-showdown-upload.csv` (header `CPT,FLEX×5`), summary, exposures, meta.
+```bash
+python -m nfl_dfs sim-showdown \
+  --pool fixtures/showdown_pool.csv \
+  --projections fixtures/projections.csv \
+  --spread -2.5 --total 48.5 \
+  --n-scripts 500 --portfolio 20 --exposure 0.40 --seed 7 \
+  --out /home/box/nfl-dfs/exports
+```
+
+- `--spread` — home-team point spread (negative = home favored).
+- `--total` — Vegas over/under; higher totals → higher pace + pass tilt.
+- Also accepted via `--contest-meta` JSON keys `spread` / `total` (CLI flags override).
+- Seed remains deterministic when Vegas priors are set.
+
+**Field simulation contest pricing** (optional):
+
+```bash
+python -m nfl_dfs sim-showdown \
+  --pool fixtures/showdown_pool.csv \
+  --projections fixtures/projections.csv \
+  --field-sims 500 \
+  --ownership fixtures/ownership_sample.csv \
+  --field-size 1000 --entry-fee 5 \
+  --n-scripts 200 --portfolio 20 --seed 7 \
+  --out /home/box/nfl-dfs/exports
+```
+
+- `--field-sims N` — sample N ownership-weighted legal CPT+5FLEX opponent lineups; estimate `win_rate`, `top1_rate`, `cash_rate`, `leverage`, `est_EV`.
+- `--ownership path` — optional CSV (`dk_id,own_est`); else uses `own_est` on projections.
+- Without `--field-sims`, falls back to crude `leverage ≈ sim_frequency − avg_ownership`.
+
+**Entry-ID upload** (multi-entry):
+
+```bash
+# Sequential IDs
+python -m nfl_dfs sim-showdown ... --entry-id-start 100001 --out exports/
+
+# Or from a DK entry template CSV
+python -m nfl_dfs sim-showdown ... --entry-ids fixtures/entry_ids_sample.csv --out exports/
+```
+
+Header becomes `Entry ID,CPT,FLEX,FLEX,FLEX,FLEX,FLEX`. Omit both flags for bare `CPT,FLEX×5`.
+
+Other optional flags: `--read NAME=1.2`, `--contest-meta fixtures/contest_sample.json`, `--actuals`, `--backtest-out`.
+
+Outputs: `lineups-showdown-upload.csv`, `sim-showdown-priced.csv`, summary, exposures, meta.
 
 ### 2) Classic
 
@@ -106,9 +153,9 @@ Optional `--payouts place,payout CSV`. **Never mutates `uploads/`.**
 
 ## Method (short)
 
-- **Showdown:** scripts tilt team means then sample correlated residuals; try each CPT; portfolio with exposure + CPT diversity.
+- **Showdown:** Vegas-biased (optional) scripts tilt team means then sample correlated residuals; try each CPT; portfolio with exposure + CPT diversity + field-chalk avoidance.
 - **Classic:** per-game scripts across the slate + correlated noise; greedy slot fill with local swaps; portfolio exposure cap (~40%, soft +5–10% relax if under-filled).
-- **Contest price (Showdown):** `leverage ≈ sim_frequency − avg_ownership`.
+- **Contest price (Showdown):** field sim → `win_rate` / `cash_rate` / `est_EV`; else crude `leverage ≈ sim_frequency − avg_ownership`.
 
 ## DK scoring (enforced in `scoring.py`)
 
@@ -119,7 +166,7 @@ Pass Yd 0.04 · Pass TD 4 · INT −1 · Rush/Rec Yd 0.1 · Rush/Rec TD 6 · Rec
 ```
 src/nfl_dfs/     scoring, showdown_rules, classic_*, scripts, optimize,
                  portfolio, contest, ingest, backtest, flashback, cli
-fixtures/        showdown + classic pools/projections/actuals + DK salary samples
+fixtures/        showdown + classic pools/projections/actuals + ownership + entry IDs
 tests/           pytest
 uploads/         delivered uploads — never mutated by Lab/sim/flashback
 exports/         sim outputs & projection handoffs

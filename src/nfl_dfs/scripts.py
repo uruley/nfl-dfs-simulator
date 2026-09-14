@@ -1,4 +1,8 @@
-"""Game-script sampling and correlated fantasy-point outcomes."""
+"""Game-script sampling and correlated fantasy-point outcomes.
+
+Optional Vegas priors (--spread / --total) bias pace, pass_tilt, and margin
+while preserving deterministic seed behavior via the caller's RNG.
+"""
 
 from __future__ import annotations
 
@@ -9,14 +13,63 @@ import numpy as np
 from nfl_dfs.showdown_rules import Player
 
 
-def sample_scripts(n: int, rng: np.random.Generator) -> list[dict]:
-    """Draw game-script paths: pace, pass/run tilt, margin (blowout vs close)."""
+def _beta_around(mu: float, concentration: float, rng: np.random.Generator) -> float:
+    """Sample Beta with mean ``mu`` in (0,1) and given concentration (a+b)."""
+    mu = float(np.clip(mu, 0.02, 0.98))
+    a = max(0.5, mu * concentration)
+    b = max(0.5, (1.0 - mu) * concentration)
+    return float(rng.beta(a, b))
+
+
+def sample_scripts(
+    n: int,
+    rng: np.random.Generator,
+    spread: float | None = None,
+    total: float | None = None,
+) -> list[dict]:
+    """Draw game-script paths: pace, pass/run tilt, margin (blowout vs close).
+
+    Parameters
+    ----------
+    spread :
+        Optional home-team point spread (negative = home favored). Biases
+        ``home_share`` / margin toward the favorite.
+    total :
+        Optional Vegas over/under. Higher totals bias pace up and pass_tilt up.
+    """
+    # Pace prior: fixture model uses ~48; map total≈45 → 48.
+    if total is not None:
+        pace_mu = 48.0 + (float(total) - 45.0) * 0.65
+        pace_sd = 5.0
+    else:
+        pace_mu, pace_sd = 48.0, 8.0
+
+    # Pass-tilt prior (beta mean). Higher totals → more pass-heavy.
+    if total is not None:
+        pass_mu = float(np.clip(0.48 + (float(total) - 45.0) * 0.012, 0.30, 0.72))
+        pass_conc = 14.0
+    else:
+        pass_mu, pass_conc = 0.53, 8.5  # ≈ Beta(4.5, 4.0)
+
+    # Home scoring share prior from spread (home favored → share > 0.5).
+    if spread is not None:
+        # Rough: -7 home favorite → ~0.75 share; +7 dog → ~0.25.
+        hs_mu = float(np.clip(0.5 - float(spread) / 28.0, 0.18, 0.82))
+        hs_conc = 16.0
+    else:
+        hs_mu, hs_conc = 0.5, 10.0  # ≈ Beta(5, 5)
+
     scripts: list[dict] = []
     for i in range(n):
-        pace = float(rng.normal(48.0, 8.0))
-        home_share = float(rng.beta(5, 5))
+        pace = float(rng.normal(pace_mu, pace_sd))
+        home_share = _beta_around(hs_mu, hs_conc, rng)
+        # Margin in "points-ish" units tied to pace and share imbalance.
         margin = (home_share - 0.5) * pace * 2.0
-        pass_tilt = float(rng.beta(4.5, 4.0))
+        if spread is not None:
+            # Soft pull toward implied margin ≈ -spread.
+            implied = -float(spread)
+            margin = 0.55 * margin + 0.45 * (implied + float(rng.normal(0, 3.5)))
+        pass_tilt = _beta_around(pass_mu, pass_conc, rng)
         weather = float(np.clip(rng.normal(1.0, 0.08), 0.75, 1.15))
         if abs(margin) >= 14:
             tag = "blowout"
@@ -35,6 +88,8 @@ def sample_scripts(n: int, rng: np.random.Generator) -> list[dict]:
                 "pass_tilt": pass_tilt,
                 "weather": weather,
                 "tag": tag,
+                "vegas_spread": spread,
+                "vegas_total": total,
             }
         )
     return scripts

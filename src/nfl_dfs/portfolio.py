@@ -1,4 +1,8 @@
-"""Portfolio construction across distinct scripts with exposure caps."""
+"""Portfolio construction across distinct scripts with exposure caps.
+
+Optionally diversifies away from *field chalk* (high-ownership stacks) in
+addition to capping exposure versus our own portfolio (~40% default).
+"""
 
 from __future__ import annotations
 
@@ -30,9 +34,32 @@ def _would_exceed(
     return False
 
 
-def _diversity_score(lu: Lineup, exp: Counter) -> float:
+def _field_chalk_penalty(
+    lu: Lineup,
+    own_map: dict[str, float] | None,
+    chalk_threshold: float = 0.20,
+) -> float:
+    """Penalty for stacking high-owned (field chalk) players."""
+    if not own_map:
+        return 0.0
+    owns = [own_map.get(pid, 0.15) for pid in lu.player_ids()]
+    avg = sum(owns) / max(1, len(owns))
+    n_chalk = sum(1 for o in owns if o >= chalk_threshold)
+    # Product-ish stack risk: geometric mean of owns (high when all chalk).
+    geo = 1.0
+    for o in owns:
+        geo *= max(0.01, o)
+    geo = geo ** (1.0 / max(1, len(owns)))
+    return 12.0 * avg + 2.5 * n_chalk + 18.0 * geo
+
+
+def _diversity_score(
+    lu: Lineup,
+    exp: Counter,
+    own_map: dict[str, float] | None = None,
+) -> float:
     penalty = sum(exp[pid] for pid in lu.player_ids())
-    return lu.sim_fp - 8.0 * penalty
+    return lu.sim_fp - 8.0 * penalty - _field_chalk_penalty(lu, own_map)
 
 
 def _repair_lineup(
@@ -48,7 +75,6 @@ def _repair_lineup(
     if not over and not _would_exceed(exp, lu.player_ids(), portfolio_size, max_exposure):
         return lu
 
-    by_id = {p.dk_id: p for p in pool}
     # Start from lu; replace CPT if over-exposed
     cpt = lu.cpt
     flex = list(lu.flex)
@@ -66,7 +92,6 @@ def _repair_lineup(
             if exp[p.dk_id] >= max_count:
                 continue
             out.append(p)
-        # prefer higher proj among under-exposed
         out.sort(key=lambda p: -p.proj_fp)
         return out
 
@@ -74,9 +99,6 @@ def _repair_lineup(
         alts = under_exposed_candidates(used - {cpt.dk_id}, need_cpt=True)
         replaced = False
         for alt in alts:
-            trial_used = (used - {cpt.dk_id}) | {alt.dk_id}
-            trial_flex = [p for p in flex if p.dk_id != alt.dk_id]
-            # ensure alt not already in flex
             if alt.dk_id in {p.dk_id for p in flex}:
                 continue
             if lineup_salary(alt, flex) <= SALARY_CAP:
@@ -87,7 +109,6 @@ def _repair_lineup(
         if not replaced:
             return None
 
-    # Replace over-exposed FLEX one at a time
     for i, p in enumerate(list(flex)):
         if p.dk_id not in over and exp[p.dk_id] < max_count:
             continue
@@ -112,7 +133,6 @@ def _repair_lineup(
     if lineup_salary(cpt, flex) > SALARY_CAP:
         return None
 
-    # Preserve script metadata; recompute rough sim_fp from projections
     sim_fp = cpt.proj_fp * 1.5 + sum(p.proj_fp for p in flex)
     return Lineup(
         cpt=cpt,
@@ -129,8 +149,13 @@ def build_portfolio(
     size: int = 20,
     max_exposure: float = 0.40,
     player_pool: Sequence[Player] | None = None,
+    own_map: dict[str, float] | None = None,
 ) -> PortfolioResult:
-    """Greedy portfolio: distinct keys, CPT diversity, exposure cap with repair."""
+    """Greedy portfolio: distinct keys, CPT diversity, exposure + field-chalk.
+
+    When ``own_map`` is provided, prefer lineups that are diverse vs field chalk
+    (high-ownership stacks) while still enforcing ~40% self-exposure caps.
+    """
     if size <= 0:
         return PortfolioResult([], {}, {}, 0, 0)
 
@@ -156,7 +181,8 @@ def build_portfolio(
     for lu in unique:
         by_cpt[lu.cpt.dk_id].append(lu)
     for lst in by_cpt.values():
-        lst.sort(key=lambda x: -x.sim_fp)
+        # Prefer high sim_fp, then lower field-chalk when own_map present.
+        lst.sort(key=lambda x: (-x.sim_fp, _field_chalk_penalty(x, own_map)))
 
     selected: list[Lineup] = []
     exp: Counter = Counter()
@@ -178,8 +204,14 @@ def build_portfolio(
             exp[pid] += 1
         return True
 
-    # Pass A: round-robin CPT
-    cpt_order = sorted(by_cpt.keys(), key=lambda c: -by_cpt[c][0].sim_fp)
+    # Pass A: round-robin CPT (among each CPT's list, prefer lower chalk)
+    cpt_order = sorted(
+        by_cpt.keys(),
+        key=lambda c: (
+            -by_cpt[c][0].sim_fp,
+            _field_chalk_penalty(by_cpt[c][0], own_map),
+        ),
+    )
     progress = True
     while len(selected) < size and progress:
         progress = False
@@ -191,7 +223,7 @@ def build_portfolio(
                     progress = True
                     break
 
-    # Pass B: diversity greedy
+    # Pass B: diversity greedy (self-exposure + field chalk)
     while len(selected) < size:
         best: Lineup | None = None
         best_score = float("-inf")
@@ -200,7 +232,7 @@ def build_portfolio(
                 continue
             if _would_exceed(exp, lu.player_ids(), size, max_exposure):
                 continue
-            score = _diversity_score(lu, exp)
+            score = _diversity_score(lu, exp, own_map)
             if lu.script_id >= 0 and lu.script_id not in used_scripts:
                 score += 3.0
             if score > best_score:
@@ -212,7 +244,7 @@ def build_portfolio(
 
     # Pass C: repair over-exposed candidates into legal under-cap lineups
     if len(selected) < size:
-        ranked = sorted(unique, key=lambda lu: -_diversity_score(lu, exp))
+        ranked = sorted(unique, key=lambda lu: -_diversity_score(lu, exp, own_map))
         for lu in ranked:
             if len(selected) >= size:
                 break
@@ -225,7 +257,7 @@ def build_portfolio(
     relax = max_exposure
     while len(selected) < size and relax < max_exposure + 0.10 - 1e-12:
         relax = min(1.0, relax + 0.05)
-        ranked = sorted(unique, key=lambda lu: -_diversity_score(lu, exp))
+        ranked = sorted(unique, key=lambda lu: -_diversity_score(lu, exp, own_map))
         for lu in ranked:
             if len(selected) >= size:
                 break

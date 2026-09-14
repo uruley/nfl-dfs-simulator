@@ -12,6 +12,7 @@ SALARY_CAP = 50_000
 CPT_MULT = 1.5
 N_FLEX = 5
 UPLOAD_HEADER = ["CPT", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"]
+UPLOAD_HEADER_ENTRY_ID = ["Entry ID", "CPT", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"]
 
 CELL_RE = re.compile(r"^(?P<name>.+?)\s*\((?P<id>[^)]+)\)\s*$")
 
@@ -217,10 +218,68 @@ def apply_reads(players: list[Player], reads: dict[str, float]) -> None:
             p.boost = float(mult)
 
 
-def write_upload_csv(path: Path, lineups: list[Lineup]) -> None:
+def write_upload_csv(
+    path: Path,
+    lineups: list[Lineup],
+    entry_ids: list[str] | None = None,
+) -> None:
+    """Write DK upload CSV.
+
+    Bare format header: CPT,FLEX×5.
+    Entry-ID format (when ``entry_ids`` provided): Entry ID,CPT,FLEX×5.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    use_entry = entry_ids is not None
+    header = UPLOAD_HEADER_ENTRY_ID if use_entry else UPLOAD_HEADER
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(UPLOAD_HEADER)
-        for lu in lineups:
-            w.writerow(lu.cells())
+        w.writerow(header)
+        for i, lu in enumerate(lineups):
+            cells = lu.cells()
+            if use_entry:
+                eid = entry_ids[i] if i < len(entry_ids) else ""
+                w.writerow([eid, *cells])
+            else:
+                w.writerow(cells)
+
+
+def load_entry_ids(path: Path) -> list[str]:
+    """Load Entry IDs from a CSV (column 'Entry ID' or first column)."""
+    ids: list[str] = []
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames:
+            fields = list(reader.fieldnames)
+            key = None
+            for cand in ("Entry ID", "entry_id", "EntryID", "entry id"):
+                if cand in fields:
+                    key = cand
+                    break
+            if key is None:
+                key = fields[0]
+            for row in reader:
+                val = str(row.get(key) or "").strip()
+                if val and val.lower() not in ("entry id", "entry_id"):
+                    ids.append(val)
+        else:
+            f.seek(0)
+            for i, row in enumerate(csv.reader(f)):
+                if not row:
+                    continue
+                val = str(row[0]).strip()
+                if i == 0 and val.lower() in ("entry id", "entry_id"):
+                    continue
+                if val:
+                    ids.append(val)
+    return ids
+
+
+def make_entry_ids(n: int, start: int | str = 1) -> list[str]:
+    """Generate sequential Entry IDs starting at ``start``."""
+    try:
+        cur = int(start)
+        return [str(cur + i) for i in range(n)]
+    except (TypeError, ValueError):
+        # Non-numeric prefix: append -1, -2, ...
+        base = str(start)
+        return [f"{base}{i+1}" for i in range(n)]

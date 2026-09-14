@@ -2,7 +2,7 @@
 
 Manager: NFLDFSCoach  
 Site: DraftKings (primary)  
-Method: Showdown sim OS (also supports Classic)
+Method: Showdown sim OS (also supports Classic) — SaberSim-shaped engine
 
 ## Specialists
 | Role | Agent | Job |
@@ -22,3 +22,8 @@ Sim Lab never patches mid-slate live upload files. Fixes apply next build.
 - ~40% exposure default
 - Entry-ID vs bare Lineup Upload formats
 - results → backtest → gate calibration loop
+
+## Docs
+- Operating system (agents + CLI): [`OPERATING.md`](OPERATING.md)
+- Product roadmap (SaberSim-like + desk): [`ROADMAP.md`](ROADMAP.md)
+- Engine README (flags + method): [`README.md`](README.md)

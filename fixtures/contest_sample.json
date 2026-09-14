@@ -2,5 +2,7 @@
   "field_size": 1000,
   "entry_fee": 5.0,
   "field_mean": 120.0,
-  "field_std": 22.0
+  "field_std": 22.0,
+  "spread": -2.5,
+  "total": 48.5
 }
