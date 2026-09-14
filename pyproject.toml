@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nfl-dfs"
-version = "0.3.0"
-description = "DraftKings NFL DFS simulator (Showdown + Classic, Vegas scripts, field sim, ingest, Contest Flashback)"
+version = "0.4.0"
+description = "DraftKings NFL DFS simulator (Showdown + Classic, scorepath engine, Vegas scripts, field sim, ingest, Contest Flashback)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

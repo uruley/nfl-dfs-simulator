@@ -17,6 +17,7 @@ Scout (free intel) → Projections (means/ceilings/own) → Sim Lab (CLI + gates
 | Ownership (optional) | `exports/ownership-*.csv` or `fixtures/ownership_sample.csv` | Projections / Scout |
 | Contest meta | `fixtures/contest_sample.json` / `exports/contest-*.json` | Lab (spread, total, field) |
 | Sim portfolio | `exports/lineups-*-upload.csv` | `sim-showdown` / `sim-classic` (Lab) |
+| Path summaries | `exports/path-summaries.csv` | `sim-showdown` / `sim-classic` (scorepath) |
 | Priced metrics | `exports/sim-showdown-priced.csv` | `sim-showdown` (Lab) |
 | Gates | `backtests/next-build-gates.json` | `flashback` (Lab) |
 | Delivered uploads | `uploads/lineups-*-vN.csv` | Builder (never overwritten) |
@@ -32,19 +33,23 @@ python -m nfl_dfs ingest-dk-salary --input uploads/dk-salary.csv --out exports/p
 # 2) Showdown sim (Lab) — Vegas + field price + entry IDs
 python -m nfl_dfs sim-showdown --pool exports/pool.csv --projections exports/projections.csv \
   --n-scripts 2000 --portfolio 20 --exposure 0.40 --seed 7 --out exports/ \
+  --engine scorepath --progress-every 500 \
   --spread -2.5 --total 48.5 \
   --field-sims 1000 --ownership exports/ownership.csv \
   --field-size 1000 --entry-fee 5 \
   --entry-id-start 100001 \
   --read "Player Name=1.15"
+# --engine legacy  → old mean-tilt residuals
+# outputs include exports/path-summaries.csv
 
 # 2b) Contest meta JSON can carry spread/total/field_size/entry_fee
 python -m nfl_dfs sim-showdown --pool exports/pool.csv --projections exports/projections.csv \
   --contest-meta exports/contest.json --field-sims 500 --out exports/
 
-# 3) Classic sim
+# 3) Classic sim (scorepath per game → merge → best lineup)
 python -m nfl_dfs sim-classic --pool exports/pool.csv --projections exports/projections.csv \
-  --portfolio 20 --exposure 0.40 --out exports/
+  --n-sims 2000 --portfolio 20 --exposure 0.40 --engine scorepath --progress-every 500 \
+  --out exports/
 
 # 4) Flashback after results (Lab) — does NOT touch uploads/
 python -m nfl_dfs flashback --lineups exports/lineups-showdown-upload.csv \

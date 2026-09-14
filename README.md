@@ -2,7 +2,7 @@
 
 Local Python package for the desk DFS method (SaberSim-shaped engine + Grok Bot desk OS):
 
-1. **Simulate** game scripts (Showdown, Vegas-aware) or multi-game correlated scripts (Classic).
+1. **Simulate** score-paths / possessions (Showdown + Classic; Vegas-aware) or legacy mean-tilt scripts.
 2. **Optimize** legal DK lineups under salary + roster rules.
 3. **Price** vs an ownership-weighted field (win/cash/EV) or crude leverage.
 4. **Portfolio** with default **~40%** player exposure + diversify vs field chalk.
@@ -48,8 +48,11 @@ python -m nfl_dfs sim-showdown \
   --portfolio 20 \
   --exposure 0.40 \
   --seed 7 \
+  --engine scorepath \
   --out /home/box/nfl-dfs/exports
 ```
+
+`--engine scorepath` (default) uses the possession model; `--engine legacy` keeps mean-tilt residuals. Optional `--progress-every 100` logs to stderr.
 
 **Vegas-aware scripts** (optional): bias pace / pass_tilt / margin from priors.
 
@@ -98,7 +101,7 @@ Header becomes `Entry ID,CPT,FLEX,FLEX,FLEX,FLEX,FLEX`. Omit both flags for bare
 
 Other optional flags: `--read NAME=1.2`, `--contest-meta fixtures/contest_sample.json`, `--actuals`, `--backtest-out`.
 
-Outputs: `lineups-showdown-upload.csv`, `sim-showdown-priced.csv`, summary, exposures, meta.
+Outputs: `lineups-showdown-upload.csv`, `path-summaries.csv`, `sim-showdown-priced.csv`, summary, exposures, meta.
 
 ### 2) Classic
 
@@ -113,13 +116,13 @@ python -m nfl_dfs sim-classic \
   --out /home/box/nfl-dfs/exports
 ```
 
-Optional: `--read NAME=1.2` (repeatable).
+Optional: `--read NAME=1.2` (repeatable), `--engine scorepath|legacy`, `--progress-every N`.
 
-**Sim method:** for each draw, sample a mini game-script per slate game (pace / pass-tilt / margin / weather), tilt player means, then add team + pass-game correlated residuals. Documented in `src/nfl_dfs/classic_sim.py`.
+**Sim method (scorepath):** for each draw, run the possession model per slate game, merge realized FPs, then optimize a Classic lineup. Legacy: per-game mean-tilt + correlated residuals (`classic_sim.py`).
 
 **Rules enforced:** QB,RB,RB,WR,WR,WR,TE,FLEX,DST; $50k; FLEX=RB/WR/TE; ≥2 games on multi-game slates; upload cells `Name (id)`.
 
-Outputs: `lineups-classic-upload.csv` (header exactly `QB,RB,RB,WR,WR,WR,TE,FLEX,DST`), summary, exposures, meta.
+Outputs: `lineups-classic-upload.csv` (header exactly `QB,RB,RB,WR,WR,WR,TE,FLEX,DST`), `path-summaries.csv`, summary, exposures, meta.
 
 ### 3) Ingest DK salary file
 
@@ -174,8 +177,10 @@ Outputs: `scratch-watch-last.json`, `scratch-watch-report.md`, and `scratch-hits
 
 ## Method (short)
 
-- **Showdown:** Vegas-biased (optional) scripts tilt team means then sample correlated residuals; try each CPT; portfolio with exposure + CPT diversity + field-chalk avoidance.
-- **Classic:** per-game scripts across the slate + correlated noise; greedy slot fill with local swaps; portfolio exposure cap (~40%, soft +5–10% relax if under-filled).
+- **Score-path engine (default, `--engine scorepath`):** sample a possession-level game path (pace / margin / pass rate from Vegas priors + game state) → allocate team yards/TDs/turnovers → distribute to players via projection usage shares (`proj_fp × boost`) → DK FP via `scoring.py` → **best legal lineup for that realized FP vector**. Portfolio still exposure-capped ~40% and diversifies across path tags. Emits `path-summaries.csv`.
+- **Legacy (`--engine legacy`):** previous mean-tilt + correlated residuals (Showdown / Classic).
+- **Showdown:** CPT+5FLEX best lineup(s) per path; optional field sim pricing.
+- **Classic:** per-game scorepath merge across slate games, then best 9-slot lineup.
 - **Contest price (Showdown):** field sim → `win_rate` / `cash_rate` / `est_EV`; else crude `leverage ≈ sim_frequency − avg_ownership`.
 
 ## DK scoring (enforced in `scoring.py`)
@@ -185,7 +190,7 @@ Pass Yd 0.04 · Pass TD 4 · INT −1 · Rush/Rec Yd 0.1 · Rush/Rec TD 6 · Rec
 ## Layout
 
 ```
-src/nfl_dfs/     scoring, showdown_rules, classic_*, scripts, optimize,
+src/nfl_dfs/     scoring, scorepath, showdown_rules, classic_*, scripts, optimize,
                  portfolio, contest, ingest, backtest, flashback, cli
 fixtures/        showdown + classic pools/projections/actuals + ownership + entry IDs
 tests/           pytest

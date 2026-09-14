@@ -24,8 +24,9 @@ from nfl_dfs.contest import (
     load_ownership_csv,
     price_lineups,
 )
-from nfl_dfs.optimize import build_lineups_by_cpt
+from nfl_dfs.optimize import build_best_lineup, build_lineups_by_cpt
 from nfl_dfs.portfolio import build_portfolio
+from nfl_dfs.scorepath import realize_game_path, write_path_summaries_csv
 from nfl_dfs.scripts import prepare_arrays, sample_outcomes, sample_scripts, script_player_means
 from nfl_dfs.showdown_rules import (
     SALARY_CAP,
@@ -142,18 +143,71 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
 
     rng = np.random.default_rng(args.seed)
     teams, teams_idx, pos_codes, stds = prepare_arrays(players)
-    scripts = sample_scripts(args.n_scripts, rng, spread=spread, total=total)
+    engine = (getattr(args, "engine", None) or "scorepath").lower()
+    progress_every = int(getattr(args, "progress_every", 0) or 0)
 
     candidates = []
     tag_counts: Counter = Counter()
-    for script in scripts:
-        tag_counts[script["tag"]] += 1
-        means = script_player_means(players, script, teams)
-        fp = sample_outcomes(means, stds, teams_idx, pos_codes, rng)
-        alts = build_lineups_by_cpt(
-            players, fp, script_id=script["script_id"], tag=script["tag"], top_n=4
-        )
-        candidates.extend(alts)
+    path_summaries: list[dict] = []
+
+    if engine == "legacy":
+        scripts = sample_scripts(args.n_scripts, rng, spread=spread, total=total)
+        for script in scripts:
+            tag_counts[script["tag"]] += 1
+            means = script_player_means(players, script, teams)
+            fp = sample_outcomes(means, stds, teams_idx, pos_codes, rng)
+            alts = build_lineups_by_cpt(
+                players, fp, script_id=script["script_id"], tag=script["tag"], top_n=4
+            )
+            candidates.extend(alts)
+            path_summaries.append(
+                {
+                    "script_id": script["script_id"],
+                    "tag": script["tag"],
+                    "possessions": "",
+                    "final_margin": round(float(script["margin"]), 2),
+                    "pass_rate": round(float(script["pass_tilt"]), 3),
+                    "home": teams[0] if teams else "",
+                    "away": teams[1] if len(teams) > 1 else "",
+                    "top_scorers": [],
+                }
+            )
+            if progress_every and (script["script_id"] + 1) % progress_every == 0:
+                print(
+                    f"legacy progress {script['script_id']+1}/{args.n_scripts}",
+                    file=sys.stderr,
+                )
+    else:
+        # scorepath (default): realize FPs via possession model, then best lineup(s) for THAT path
+        for i in range(args.n_scripts):
+            fp, summary = realize_game_path(
+                players,
+                rng,
+                teams=teams,
+                spread=spread,
+                total=total,
+                script_id=i,
+            )
+            tag_counts[summary["tag"]] += 1
+            path_summaries.append(summary)
+            # Best legal CPT+5FLEX for this realized path (plus CPT diversity alts)
+            best = build_best_lineup(
+                players, fp, script_id=i, tag=summary["tag"]
+            )
+            alts = build_lineups_by_cpt(
+                players, fp, script_id=i, tag=summary["tag"], top_n=4
+            )
+            if best is not None:
+                # Ensure the true best is present
+                keys = {lu.key() for lu in alts}
+                if best.key() not in keys:
+                    alts = [best] + alts
+            candidates.extend(alts)
+            if progress_every and (i + 1) % progress_every == 0:
+                print(
+                    f"scorepath progress {i+1}/{args.n_scripts}",
+                    file=sys.stderr,
+                )
 
     if not candidates:
         print("ERROR: no legal lineups built across scripts", file=sys.stderr)
@@ -218,10 +272,11 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
 
     id_to_name = {p.dk_id: p.name for p in players}
     summary_path = out_dir / "sim-showdown-summary.txt"
+    write_path_summaries_csv(out_dir / "path-summaries.csv", path_summaries)
     lines = [
-        "NFL DFS — Showdown sim v2 (SaberSim-like)",
+        "NFL DFS — Showdown sim v3 (scorepath / SaberSim-like)",
         f"players={len(players)}  n_scripts={args.n_scripts}  built={n_built}  seed={args.seed}",
-        f"teams={','.join(teams)}  salary_cap={SALARY_CAP}  exposure_cap={args.exposure}",
+        f"engine={engine}  teams={','.join(teams)}  salary_cap={SALARY_CAP}  exposure_cap={args.exposure}",
         f"vegas_spread={spread}  vegas_total={total}",
         f"field_sims={field_sims}  ownership_players={len(own_map)}",
         f"portfolio={len(port.lineups)}  unique_scripts={port.n_unique_scripts}  "
@@ -308,6 +363,7 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         "n_built": n_built,
         "portfolio": len(port.lineups),
         "seed": args.seed,
+        "engine": engine,
         "exposure_cap": args.exposure,
         "vegas_spread": spread,
         "vegas_total": total,
@@ -315,6 +371,7 @@ def cmd_sim_showdown(args: argparse.Namespace) -> int:
         "script_tags_portfolio": port.script_tags,
         "upload": str(upload_path),
         "upload_format": "entry-id" if entry_ids is not None else "bare",
+        "path_summaries": str(out_dir / "path-summaries.csv"),
     }
     (out_dir / "sim-showdown-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -377,21 +434,41 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
     reads = _parse_reads(args.read)
     cr.apply_reads(players, reads)
 
+    from nfl_dfs.scorepath import realize_classic_slate
+
     rng = np.random.default_rng(args.seed)
     _teams, teams_idx, pos_codes, stds, game_keys = prepare_classic_arrays(players)
     n_sims = args.n_sims
+    engine = (getattr(args, "engine", None) or "scorepath").lower()
+    progress_every = int(getattr(args, "progress_every", 0) or 0)
 
     candidates = []
     tag_counts: Counter = Counter()
+    path_summaries: list[dict] = []
     for i in range(n_sims):
-        fp, tag = sample_classic_outcomes(
-            players, teams_idx, pos_codes, stds, game_keys, rng, sim_id=i
-        )
+        if engine == "legacy":
+            fp, tag = sample_classic_outcomes(
+                players, teams_idx, pos_codes, stds, game_keys, rng, sim_id=i
+            )
+            summary = {
+                "script_id": i,
+                "tag": tag,
+                "possessions": "",
+                "final_margin": "",
+                "pass_rate": "",
+                "top_scorers": [],
+            }
+        else:
+            fp, summary = realize_classic_slate(players, rng, sim_id=i)
+            tag = summary["tag"]
         tag_counts[tag] += 1
+        path_summaries.append(summary)
         alts = build_lineups_diverse(
             players, fp, script_id=i, tag=tag, top_n=4
         )
         candidates.extend(alts)
+        if progress_every and (i + 1) % progress_every == 0:
+            print(f"{engine} classic progress {i+1}/{n_sims}", file=sys.stderr)
 
     if not candidates:
         print("ERROR: no legal Classic lineups built across sims", file=sys.stderr)
@@ -416,17 +493,18 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
     id_to_name = {p.dk_id: p.name for p in players}
     n_games = cr.slate_game_count(players)
     summary_path = out_dir / "sim-classic-summary.txt"
+    write_path_summaries_csv(out_dir / "path-summaries.csv", path_summaries)
     lines = [
-        "NFL DFS — Classic sim v1",
+        "NFL DFS — Classic sim v2 (scorepath)",
         f"players={len(players)}  n_sims={n_sims}  built={len(candidates)}  seed={args.seed}",
-        f"slate_games={n_games}  salary_cap={cr.SALARY_CAP}  exposure_cap={args.exposure}",
+        f"engine={engine}  slate_games={n_games}  salary_cap={cr.SALARY_CAP}  exposure_cap={args.exposure}",
         f"portfolio={len(port.lineups)}  unique_scripts={port.n_unique_scripts}  "
         f"unique_lineups={port.n_unique_lineups}",
         f"script_tags_sampled={dict(tag_counts)}",
         f"script_tags_portfolio={port.script_tags}",
         f"reads={reads or '{}'}",
         "",
-        "Sim method: per-game script tilt + team/pass correlated residuals (see classic_sim.py).",
+        f"Sim method: engine={engine} (scorepath=possession model; legacy=mean-tilt+residuals).",
         "Upload header: " + ",".join(cr.UPLOAD_HEADER),
         f"Upload CSV: {upload_path}",
         "",
@@ -457,7 +535,9 @@ def cmd_sim_classic(args: argparse.Namespace) -> int:
         "slate_games": n_games,
         "script_tags_portfolio": port.script_tags,
         "upload": str(upload_path),
-        "sim_method": "per-game script tilt + correlated residuals",
+        "engine": engine,
+        "sim_method": "scorepath" if engine != "legacy" else "per-game script tilt + correlated residuals",
+        "path_summaries": str(out_dir / "path-summaries.csv"),
     }
     (out_dir / "sim-classic-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -582,6 +662,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--portfolio", type=int, default=20)
     p.add_argument("--exposure", type=float, default=0.40)
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument(
+        "--engine",
+        choices=["scorepath", "legacy"],
+        default="scorepath",
+        help="scorepath=possession model (default); legacy=mean-tilt residuals",
+    )
+    p.add_argument(
+        "--progress-every",
+        type=int,
+        default=0,
+        help="Print progress to stderr every N sims (0=off)",
+    )
     p.add_argument("--out", required=True, help="Output directory")
     p.add_argument(
         "--read",
@@ -644,6 +736,18 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--portfolio", type=int, default=20)
     c.add_argument("--exposure", type=float, default=0.40)
     c.add_argument("--seed", type=int, default=7)
+    c.add_argument(
+        "--engine",
+        choices=["scorepath", "legacy"],
+        default="scorepath",
+        help="scorepath=per-game possession model (default); legacy=mean-tilt",
+    )
+    c.add_argument(
+        "--progress-every",
+        type=int,
+        default=0,
+        help="Print progress to stderr every N sims (0=off)",
+    )
     c.add_argument("--out", required=True, help="Output directory")
     c.add_argument(
         "--read",
