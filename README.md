@@ -8,6 +8,7 @@ Local Python package for the desk DFS method (SaberSim-shaped engine + Grok Bot 
 4. **Portfolio** with default **~40%** player exposure + diversify vs field chalk.
 5. **Ingest** real DK salary-file CSVs into normalized pools.
 6. **Contest Flashback** — score uploads vs actuals; emit next-build gates (never mutates `uploads/`).
+7. **Scratch watch** — compare entered lineups vs OUT/INACTIVE; alert on hits only (never mutates uploads).
 
 Hard rules: `DK-NFL-SHOWDOWN-RULES.md`, `DK-NFL-CLASSIC-RULES.md`.  
 Projection contracts: `PROJECTIONS.md`. Salary ingest: `INGEST.md`.  
@@ -33,6 +34,7 @@ Requires Python 3.11+ and `numpy`. No paid APIs; tests need no network.
 | `sim-classic` | Classic multi-game sims → 9-slot lineups → portfolio |
 | `ingest-dk-salary` | DK salary CSV → normalized pool CSV |
 | `flashback` | Score lineups vs actuals → scores + summary + gates |
+| `scratch-watch` | Entered lineups vs OUT/INACTIVE → alert on hits |
 
 ---
 
@@ -150,6 +152,25 @@ Emits:
 Optional `--payouts place,payout CSV`. **Never mutates `uploads/`.**
 
 ---
+
+### 5) Scratch / inactives watch
+
+Compare players in a delivered upload CSV against a status map (local CSV, optional public fetch, or Scout brief fallback). **Alerts only when someone in our lineups is OUT or INACTIVE** (DOUBTFUL = soft warn). Never mutates the lineups file.
+
+```bash
+python -m nfl_dfs scratch-watch \
+  --lineups uploads/lineups-classic-2game-20-v4.csv \
+  --pool exports/pool-classic-2game.csv \
+  --games DAL@NYG,DEN@KC \
+  --fetch \
+  --out exports/scratch-watch
+```
+
+Offline / tests: `--status fixtures/scratch_status_sample.csv`.  
+Clean automation: `--quiet-ok` (exit 0 + quiet stdout when `all_clear`).
+
+Outputs: `scratch-watch-last.json`, `scratch-watch-report.md`, and `scratch-hits.csv` when any HIT.
+
 
 ## Method (short)
 

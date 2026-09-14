@@ -510,6 +510,67 @@ def cmd_flashback(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_scratch_watch(args: argparse.Namespace) -> int:
+    from nfl_dfs.scratch_watch import (
+        DEFAULT_OUT,
+        run_scratch_watch,
+        write_scratch_artifacts,
+    )
+
+    lineups = Path(args.lineups)
+    if not lineups.exists():
+        print(f"ERROR: lineups not found: {lineups}", file=sys.stderr)
+        return 2
+    pool = Path(args.pool) if args.pool else None
+    status = Path(args.status) if args.status else None
+    out_dir = Path(args.out) if args.out else DEFAULT_OUT
+    games = [g.strip() for g in (args.games or "").split(",") if g.strip()]
+
+    # Hard safety: never write into uploads/
+    if "uploads" in out_dir.resolve().parts and out_dir.resolve().name == "uploads":
+        print("ERROR: refusing to write under uploads/", file=sys.stderr)
+        return 1
+
+    result = run_scratch_watch(
+        lineups,
+        pool_path=pool,
+        status_path=status,
+        fetch=bool(args.fetch),
+        games=games or None,
+    )
+    paths = write_scratch_artifacts(result, out_dir)
+
+    quiet = bool(args.quiet_ok) and result.all_clear
+    if not quiet:
+        print(
+            f"scratch-watch: lineups={result.lineups} unique={result.unique_players} "
+            f"all_clear={result.all_clear} action={result.action} "
+            f"hits={len(result.flagged)} warns={len(result.soft_warns)}"
+        )
+        for h in result.flagged:
+            print(
+                f"  HIT {h['status']:8} {h['name']} ({h['dk_id']}) "
+                f"{h['team']} in {h['lineups_affected']} lineups"
+            )
+        for w in result.soft_warns:
+            print(
+                f"  WARN {w['status']:8} {w['name']} ({w['dk_id']}) "
+                f"{w['team']} in {w['lineups_affected']} lineups"
+            )
+        if result.all_clear:
+            print("  all clear — no OUT/INACTIVE players in entered lineups")
+        else:
+            print(f"  suggest next upload: {result.next_upload_suggestion} (do not mutate current)")
+        for k, p in paths.items():
+            print(f"  {k}: {p}")
+    else:
+        # still write artifacts; minimal/no stdout
+        pass
+
+    return 0 if result.all_clear else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="nfl_dfs", description="NFL DFS simulator")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -626,6 +687,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory (e.g. backtests/) — never uploads/",
     )
     fb.set_defaults(func=cmd_flashback)
+
+    sw = sub.add_parser(
+        "scratch-watch",
+        help="Compare entered lineups vs OUT/INACTIVE status; alert on hits only",
+    )
+    sw.add_argument(
+        "--lineups",
+        required=True,
+        help="DK upload CSV (Classic or Showdown) with Name (id) cells",
+    )
+    sw.add_argument(
+        "--pool",
+        default="",
+        help="Optional pool CSV for team lookup by dk_id",
+    )
+    sw.add_argument(
+        "--status",
+        default="",
+        help="Optional local inactives CSV (dk_id or name, team, status)",
+    )
+    sw.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Try free public inactives (NFL.com/ESPN); fall back to Scout briefs",
+    )
+    sw.add_argument(
+        "--games",
+        default="",
+        help="Comma game keys like DAL@NYG,DEN@KC (fetch scope)",
+    )
+    sw.add_argument(
+        "--out",
+        default="/home/box/nfl-dfs/exports/scratch-watch",
+        help="Output directory (default: exports/scratch-watch)",
+    )
+    sw.add_argument(
+        "--quiet-ok",
+        action="store_true",
+        help="Exit 0 and suppress stdout when all_clear",
+    )
+    sw.set_defaults(func=cmd_scratch_watch)
 
     return ap
 

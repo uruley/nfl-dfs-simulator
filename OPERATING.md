@@ -20,6 +20,7 @@ Scout (free intel) → Projections (means/ceilings/own) → Sim Lab (CLI + gates
 | Priced metrics | `exports/sim-showdown-priced.csv` | `sim-showdown` (Lab) |
 | Gates | `backtests/next-build-gates.json` | `flashback` (Lab) |
 | Delivered uploads | `uploads/lineups-*-vN.csv` | Builder (never overwritten) |
+| Scratch watch | `exports/scratch-watch/` | `scratch-watch` (Lab / Manager) — never mutates uploads |
 
 ## CLI cheatsheet
 ```bash
@@ -48,12 +49,19 @@ python -m nfl_dfs sim-classic --pool exports/pool.csv --projections exports/proj
 # 4) Flashback after results (Lab) — does NOT touch uploads/
 python -m nfl_dfs flashback --lineups exports/lineups-showdown-upload.csv \
   --actuals backtests/actuals.csv --out backtests/
+
+# 5) Scratch / inactives watch (entered lineups vs OUT/INACTIVE) — never mutates uploads/
+python -m nfl_dfs scratch-watch --lineups uploads/lineups-classic-2game-20-v4.csv \
+  --pool exports/pool-classic-2game.csv --games DAL@NYG,DEN@KC --fetch \
+  --out exports/scratch-watch
+# Offline/tests: --status fixtures/scratch_status_sample.csv
+# Clean slate: --quiet-ok (exit 0, minimal stdout when all_clear)
 ```
 
 ## Role rules
 - **Scout:** free sources only; slate brief + flags (injuries, weather, Nabers-style snap risk); note Vegas spread/total.
 - **Projections:** fill projection CSV schema (incl. `own_est`); never invent DK IDs/salaries — join to ingested pool.
-- **Sim Lab:** owns CLI science + Flashback gates; never patches live delivered CSVs.
+- **Sim Lab:** owns CLI science + Flashback gates + `scratch-watch`; never patches live delivered CSVs.
 - **Builder:** writes versioned upload CSVs from gated exports; Entry-ID vs bare per Manager (`--entry-ids` / `--entry-id-start`).
 - **Manager:** slate lock, exposure overrides, user delivery, pushes to GitHub.
 

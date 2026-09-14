@@ -27,7 +27,7 @@ We match that method in open code, then wrap it with a managed desk (Scout → P
 ### Desk OS (Grok Bot team)
 - [ ] Slate lock protocol (Manager unlock message template — drafted in OPERATING.md)
 - [ ] Flashback → Lab gates → Builder checklist automation hooks
-- [ ] Optional slate watcher (inactive until unlocked)
+- [x] Optional slate watcher (`scratch-watch` — OUT/INACTIVE vs entered lineups)
 
 ## Non-goals (for now)
 Paid projection scrapers, cloning SaberSim UI, FanDuel, live mid-slate Lab patches.
